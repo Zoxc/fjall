@@ -1,0 +1,22 @@
+workspace = { members = ["codegen_test", "direct_test", "global_alloc_test"] }
+
+[package]
+name = "fjall"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitflags = "2.4.2"
+sptr = "0.3.2"
+windows-sys = { version = "0.52.0", features = [
+    "Win32_System_Memory",
+    "Win32_Foundation",
+    "Win32_System_SystemServices", # FOR DLL_THREAD_DETACH
+] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
