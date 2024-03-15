@@ -1,105 +1,132 @@
 use core::ptr::null_mut;
+use std::cell::Cell;
 
-#[derive(Copy, Clone, Debug)]
-pub struct Node<T> {
-    pub prev: *mut T,
-    pub next: *mut T,
+#[derive(Clone, Debug)]
+pub struct Node<T: Copy> {
+    pub prev: Cell<Option<T>>,
+    pub next: Cell<Option<T>>,
 }
 
-impl<T> Node<T> {
+impl<T: Copy> Node<T> {
     pub const UNUSED: Node<T> = Node {
-        prev: null_mut(),
-        next: null_mut(),
+        prev: Cell::new(None),
+        next: Cell::new(None),
     };
 }
 
 #[derive(Debug)]
-pub struct List<T> {
-    pub first: *mut T,
-    pub last: *mut T,
+pub struct List<T: Copy> {
+    pub first: Cell<Option<T>>,
+    pub last: Cell<Option<T>>,
 }
 
-impl<T> Copy for List<T> {}
-impl<T> Clone for List<T> {
+impl<T: Copy> Clone for List<T> {
     fn clone(&self) -> Self {
-        *self
+        Self {
+            first: self.first.clone(),
+            last: self.last.clone(),
+        }
     }
 }
 
-impl<T> List<T> {
+impl<T: Copy + PartialEq> List<T> {
     pub const EMPTY: List<T> = List {
-        first: null_mut(),
-        last: null_mut(),
+        first: Cell::new(None),
+        last: Cell::new(None),
     };
 
     #[inline]
-    pub unsafe fn iter<N: Fn(*mut T) -> *mut Node<T>>(&self, node: N) -> Iter<T, N> {
+    pub unsafe fn iter<N: Fn(T) -> *mut Node<T>>(&self, node: N) -> Iter<true, T, N> {
         Iter {
-            current: self.first,
+            current: self.first.get(),
             node,
         }
     }
 
-    pub unsafe fn remove(&mut self, element: *mut T, node: impl Fn(*mut T) -> *mut Node<T>) {
-        let element_node = &mut *node(element);
-        if !element_node.prev.is_null() {
-            (*node(element_node.prev)).next = element_node.next;
-        }
-        if !element_node.next.is_null() {
-            (*node(element_node.next)).prev = element_node.prev;
-        }
-        if element == self.last {
-            self.last = element_node.prev;
-        }
-        if element == self.first {
-            self.first = element_node.next;
-        }
-        element_node.next = null_mut();
-        element_node.prev = null_mut();
-    }
-
-    pub unsafe fn push_front(&mut self, element: *mut T, node: impl Fn(*mut T) -> *mut Node<T>) {
-        let element_node = &mut *node(element);
-        element_node.next = self.first;
-        element_node.prev = null_mut();
-        if self.first.is_null() {
-            debug_assert!(self.last.is_null());
-            self.first = element;
-            self.last = element;
-        } else {
-            (*node(self.first)).prev = element;
-            self.first = element;
+    #[inline]
+    pub unsafe fn iter_rev<N: Fn(T) -> *mut Node<T>>(&self, node: N) -> Iter<false, T, N> {
+        Iter {
+            current: self.last.get(),
+            node,
         }
     }
 
-    pub unsafe fn push_back(&mut self, element: *mut T, node: impl Fn(*mut T) -> *mut Node<T>) {
+    pub unsafe fn only_entry(&self, element: T) -> bool {
+        self.first.get() == Some(element) && self.last.get() == Some(element)
+    }
+
+    /// Checks if `element` is in some list or this list.
+    pub unsafe fn may_contain(&self, element: T, node: impl Fn(T) -> *mut Node<T>) -> bool {
+        (*node(element)).next.get().is_some()
+            || (*node(element)).prev.get().is_some()
+            || self.first.get() == Some(element)
+    }
+
+    pub unsafe fn remove(&self, element: T, node: impl Fn(T) -> *mut Node<T>) {
         let element_node = &mut *node(element);
-        element_node.next = null_mut();
-        element_node.prev = self.last;
-        if !self.last.is_null() {
-            debug_assert!((*node(self.last)).next.is_null());
-            (*node(self.last)).next = element;
-            self.last = element;
+        if let Some(prev) = element_node.prev.get() {
+            (*node(prev)).next.set(element_node.next.get());
+        }
+        if let Some(next) = element_node.next.get() {
+            (*node(next)).prev.set(element_node.prev.get());
+        }
+        if Some(element) == self.last.get() {
+            self.last.set(element_node.prev.get());
+        }
+        if Some(element) == self.first.get() {
+            self.first.set(element_node.next.get());
+        }
+        element_node.next.set(None);
+        element_node.prev.set(None);
+    }
+
+    pub unsafe fn push_front(&self, element: T, node: impl Fn(T) -> *mut Node<T>) {
+        let element_node = &mut *node(element);
+        element_node.next.set(self.first.get());
+        element_node.prev.set(None);
+        if let Some(first) = self.first.get() {
+            (*node(first)).prev.set(Some(element));
+            self.first.set(Some(element));
         } else {
-            self.first = element;
-            self.last = element;
+            debug_assert!(self.last.get().is_none());
+            self.first.set(Some(element));
+            self.last.set(Some(element));
+        }
+    }
+
+    pub unsafe fn push_back(&self, element: T, node: impl Fn(T) -> *mut Node<T>) {
+        let element_node = &mut *node(element);
+        element_node.next.set(None);
+        element_node.prev.set(self.last.get());
+        if let Some(last) = self.last.get() {
+            debug_assert!((*node(last)).next.get().is_none());
+            (*node(last)).next.set(Some(element));
+            self.last.set(Some(element));
+        } else {
+            self.first.set(Some(element));
+            self.last.set(Some(element));
         }
     }
 }
 
-pub struct Iter<T, N> {
-    current: *mut T,
+pub struct Iter<const FORWARD: bool, T, N> {
+    current: Option<T>,
     node: N,
 }
 
-impl<T, N: Fn(*mut T) -> *mut Node<T>> Iterator for Iter<T, N> {
-    type Item = *mut T;
+impl<const FORWARD: bool, T: Copy, N: Fn(T) -> *mut Node<T>> Iterator for Iter<FORWARD, T, N> {
+    type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if !self.current.is_null() {
-            let result = self.current;
-            self.current = unsafe { (*(self.node)(self.current)).next };
-            Some(result)
+        if let Some(current) = self.current {
+            self.current = unsafe {
+                if FORWARD {
+                    (*(self.node)(current)).next.get()
+                } else {
+                    (*(self.node)(current)).prev.get()
+                }
+            };
+            Some(current)
         } else {
             None
         }

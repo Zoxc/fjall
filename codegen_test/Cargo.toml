@@ -3,5 +3,12 @@ name = "codegen_test"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+panic-check = []
+
 [dependencies]
 fjall = { path = ".." }
+no-panic = "0.1.29"

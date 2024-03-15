@@ -1,11 +1,15 @@
 use core::slice;
-use fjall::Alloc;
+use fjall::alloc;
+use fjall::dealloc;
 use rand::Rng;
-use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
 use std::sync::atomic::AtomicPtr;
 use std::sync::mpsc::channel;
 use std::thread::yield_now;
+
+const THREADS: usize = if cfg!(miri) { 4 } else { 16 };
+const MIRI_FACTOR: usize = if cfg!(miri) { 1 } else { 10000 };
+const SIZE: usize = if cfg!(miri) { 512 } else { 1024 }; // * 1024 * 4
 
 struct Allocation {
     layout: Layout,
@@ -17,9 +21,9 @@ impl Allocation {
     fn new() -> Self {
         unsafe {
             let mut rng = rand::thread_rng();
-            let size: usize = rng.gen_range(0..1024);
+            let size: usize = rng.gen_range(1..SIZE);
             let layout = Layout::from_size_align(size as usize, 4).unwrap();
-            let ptr = Alloc.alloc(layout);
+            let ptr = alloc(layout);
             let seed: u8 = rng.gen();
             if !ptr.is_null() {
                 slice::from_raw_parts_mut(ptr, size).fill(seed);
@@ -42,21 +46,46 @@ impl Drop for Allocation {
                     .iter()
                     .all(|v| *v == self.seed));
 
-                Alloc.dealloc(ptr, self.layout);
+                dealloc(ptr, self.layout);
             }
         }
     }
 }
 
-const THREADS: usize = if cfg!(miri) { 4 } else { 16 };
-const MIRI_FACTOR: usize = if cfg!(miri) { 1 } else { 10000 };
-
 fn main() {
     unsafe {
-        let a = Alloc.alloc(Layout::new::<u8>());
-        let b = Alloc.alloc(Layout::new::<String>());
-        Alloc.dealloc(a, Layout::new::<u8>());
-        Alloc.dealloc(b, Layout::new::<String>());
+        // Large alloc
+        {
+            let layout = Layout::from_size_align(1048584, 1).unwrap();
+            let a = alloc(layout);
+            if !a.is_null() {
+                dealloc(a, layout);
+            }
+        }
+
+        // Large align and size
+        {
+            let layout = Layout::from_size_align(1048584, 0x2000).unwrap();
+            let a = alloc(layout);
+            if !a.is_null() {
+                dealloc(a, layout);
+            }
+        }
+
+        // Large align
+        {
+            let layout = Layout::from_size_align(8, 0x2000).unwrap();
+            let a = alloc(layout);
+            if !a.is_null() {
+                dealloc(a, layout);
+            }
+        }
+
+        let a = alloc(Layout::new::<u8>());
+
+        let b = alloc(Layout::new::<String>());
+        dealloc(a, Layout::new::<u8>());
+        dealloc(b, Layout::new::<String>());
 
         std::thread::scope(|scope| {
             for _ in 0..THREADS {

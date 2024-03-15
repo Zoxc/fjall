@@ -1,11 +1,110 @@
-use std::alloc::Layout;
+use crate::{
+    align_down, align_up,
+    segment::{OPTION_PURGE_DELAY, OPTION_PURGE_DOES_DECOMMIT},
+};
+use sptr::Strict;
+use std::{
+    alloc::Layout,
+    sync::atomic::{AtomicI64, Ordering},
+    time::Instant,
+};
 
 #[cfg(any(miri, unix))]
 use {core::alloc::GlobalAlloc, std::alloc::System};
 
+#[cfg(all(windows, not(miri)))]
+mod windows;
+#[cfg(all(windows, not(miri)))]
+pub use windows::*;
+
+#[cfg(miri)]
+mod thread_exit {
+    use crate::{heap::Heap, with_heap};
+
+    thread_local! {
+        static THREAD_EXIT: ThreadExit = const { ThreadExit };
+    }
+    struct ThreadExit;
+    impl Drop for ThreadExit {
+        fn drop(&mut self) {
+            unsafe {
+                with_heap(|heap| Heap::done(heap));
+            }
+        }
+    }
+    pub fn register_thread() {
+        THREAD_EXIT.with(|_| {});
+    }
+}
+#[cfg(miri)]
+pub use thread_exit::register_thread;
+
+/// A clock in milliseconds.
+#[cfg(unix)]
+pub fn clock_now() -> Option<u64> {
+    use std::mem;
+
+    unsafe {
+        let mut t = mem::zeroed();
+        (libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) == 0)
+            .then_some((t.tv_sec as u64) * 1000 + (t.tv_nsec as u64 / 1000000))
+    }
+}
+
+unsafe fn page_align_conservative(ptr: *mut u8, size: usize) -> (*mut u8, usize) {
+    let page_size = page_size();
+    let end = ptr.add(size).map_addr(|addr| align_down(addr, page_size));
+    let ptr = ptr.map_addr(|addr| align_up(addr, page_size));
+    (ptr, end.offset_from(ptr) as usize)
+}
+
+// either resets or decommits memory, returns true if the memory needs
+// to be recommitted if it is to be re-used later on.
+pub unsafe fn purge(ptr: *mut u8, size: usize, allow_reset: bool) -> bool {
+    if OPTION_PURGE_DELAY < 0 {
+        return false;
+    } // is purging allowed?}
+
+    // FIXME
+    if OPTION_PURGE_DOES_DECOMMIT
+    /*  &&   // should decommit?
+    !_mi_preloading())                                     // don't decommit during preloading (unsafe)*/
+    {
+        let (ptr, size) = page_align_conservative(ptr, size);
+        if size == 0 {
+            false
+        } else {
+            decommit(ptr, size)
+        }
+    } else {
+        /*if (allow_reset) {  // this can sometimes be not allowed if the range is not fully committed
+          _mi_os_reset(p, size, stats);
+        }*/
+        false // needs no recommit
+    }
+}
+
+pub fn has_overcommit() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        return true;
+    }
+    false
+}
+
 #[cfg(any(miri, unix))]
-pub fn alloc(layout: Layout) -> *mut u8 {
-    unsafe { System.alloc_zeroed(layout) }
+pub unsafe fn commit(ptr: *mut u8, size: usize) -> bool {
+    true
+}
+
+#[cfg(any(miri, unix))]
+pub unsafe fn decommit(ptr: *mut u8, size: usize) -> bool {
+    true
+}
+
+#[cfg(any(miri, unix))]
+pub fn alloc(layout: Layout, _commit: bool) -> (*mut u8, bool) {
+    unsafe { (System.alloc_zeroed(layout), true) }
 }
 
 #[cfg(any(miri, unix))]
@@ -13,82 +112,6 @@ pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
     System.dealloc(ptr, layout);
 }
 
-#[cfg(all(windows, not(miri)))]
-pub fn alloc(layout: Layout) -> *mut u8 {
-    use std::{mem, ptr::null_mut};
-    use windows_sys::Win32::System::Memory::{
-        MemExtendedParameterAddressRequirements, VirtualAlloc2, MEM_ADDRESS_REQUIREMENTS,
-        MEM_COMMIT, MEM_EXTENDED_PARAMETER, MEM_RESERVE, PAGE_READWRITE,
-    };
-
-    let mut address_reqs: MEM_ADDRESS_REQUIREMENTS = unsafe { mem::zeroed() };
-    address_reqs.Alignment = layout.align();
-
-    let mut param: MEM_EXTENDED_PARAMETER = unsafe { mem::zeroed() };
-    param.Anonymous2.Pointer = (&address_reqs as *const MEM_ADDRESS_REQUIREMENTS)
-        .cast_mut()
-        .cast();
-    param.Anonymous1._bitfield = MemExtendedParameterAddressRequirements as u64;
-
-    let result = unsafe {
-        VirtualAlloc2(
-            0,
-            null_mut(),
-            layout.size(),
-            MEM_RESERVE | MEM_COMMIT,
-            PAGE_READWRITE,
-            &mut param,
-            1,
-        )
-    };
-    if result.is_null() {
-        return null_mut();
-    }
-    /*  eprintln!(
-        "VirtualAlloc2 {:x}, size - {:x}",
-        result as usize,
-        layout.size()
-    );*/
-    debug_assert!(result.is_aligned_to(layout.align()));
-    result.cast()
+fn page_size() -> usize {
+    0x1000
 }
-
-#[cfg(all(windows, not(miri)))]
-pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
-    use std::io::Error;
-    use windows_sys::Win32::System::Memory::{VirtualFree, MEM_DECOMMIT, MEM_RELEASE};
-    //eprintln!("VirtualFree {:x}, size - {:x}", ptr as usize, layout.size());
-    let result = VirtualFree(ptr.cast(), 0, MEM_RELEASE);
-    if cfg!(debug_assertions) && result == 0 {
-        //   let os_error = Error::last_os_error();
-        //  eprintln!("VirtualFree failed: {os_error:?}  ");
-    }
-    debug_assert_ne!(result, 0);
-}
-
-/*
-#[cfg(unix)]
-pub fn alloc(layout: Layout) -> *mut u8 {
-    let result = aligned_alloc(layout.align(), layout.size());
-    let result = mmap(
-        NULL,
-        layout.size(),
-        PROT_READ | PROT_WRITE,
-        MAP_SHARED | MAP_ANONYMOUS,
-        -1,
-        0,
-    );
-    if result == MAP_FAILED {
-        return null_mut();
-    }
-    debug_assert!(result.is_aligned_to(layout.align()));
-    result
-}
-
-#[cfg(unix)]
-pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
-    use windows_sys::Win32::System::Memory::{VirtualFree, MEM_RELEASE};
-    let result = VirtualFree(ptr.cast(), layout.size(), MEM_RELEASE);
-    debug_assert_ne!(result, 0);
-}
-*/

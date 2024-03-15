@@ -1,19 +1,34 @@
 #![feature(core_intrinsics, const_refs_to_static, pointer_is_aligned)]
-#![allow(unstable_name_collisions, internal_features, unused)]
+#![allow(
+    unstable_name_collisions,
+    internal_features,
+    unused,
+    clippy::missing_safety_doc,
+    clippy::declare_interior_mutable_const,
+    clippy::assertions_on_constants,
+    clippy::comparison_chain
+)]
 
 use crate::heap::Heap;
 use crate::page::{Page, LARGE_PAGE_SIZE, MEDIUM_PAGE_SIZE, SMALL_PAGE_SIZE};
-use crate::segment::SEGMENT_SIZE;
+use crate::segment::{Whole, SEGMENT_SIZE};
 use core::cell::UnsafeCell;
 use core::{
     alloc::{GlobalAlloc, Layout},
     intrinsics::likely,
     mem,
 };
-use page::{Block, PageFlags};
+use page::{FreeBlock, PageFlags};
 use segment::Segment;
 use sptr::Strict;
+use std::cmp::{max, min};
+use std::fmt::Debug;
+use std::hint::unreachable_unchecked;
 use std::intrinsics::unlikely;
+use std::marker::PhantomData;
+use std::num::NonZeroUsize;
+use std::ops::Deref;
+use std::ptr::{null_mut, NonNull};
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::{alloc::System, thread_local};
 
@@ -22,21 +37,28 @@ mod linked_list;
 mod page;
 mod segment;
 mod system;
+mod tests;
 
-const PTR_SIZE: usize = mem::size_of::<*mut ()>();
-const PTR_BITS: usize = PTR_SIZE * 8;
+// A word is the smallest allocation.
+const WORD_SIZE: usize = if mem::size_of::<*mut ()>() > 16 {
+    mem::size_of::<*mut ()>()
+} else {
+    16
+};
 
 const SMALL_ALLOC_WORDS: usize = 128;
-const SMALL_ALLOC: usize = SMALL_ALLOC_WORDS * PTR_SIZE;
+const SMALL_ALLOC: usize = SMALL_ALLOC_WORDS * WORD_SIZE;
 
-const BINS: usize = 69;
+const BINS: usize = 61;
+const BIN_HUGE: usize = BINS;
 const BIN_FULL: usize = BINS + 1;
 
-// (must match REGION_MAX_ALLOC_SIZE in memory.c)
-const HUGE_OBJ_SIZE_MAX: usize = 2 * PTR_SIZE * SEGMENT_SIZE;
+const BIN_FULL_BLOCK_SIZE: usize = LARGE_OBJ_SIZE_MAX + 2 * WORD_SIZE;
+const BIN_HUGE_BLOCK_SIZE: usize = LARGE_OBJ_SIZE_MAX + WORD_SIZE;
 
-// Used as a special value to encode block sizes in 32 bits.
-const HUGE_BLOCK_SIZE: u32 = HUGE_OBJ_SIZE_MAX as u32;
+const _: () = {
+    assert!(BIN_HUGE_BLOCK_SIZE > LARGE_OBJ_SIZE_MAX);
+};
 
 const MAX_EXTEND_SIZE: usize = 4 * 1024; // heuristic, one OS page seems to work well.
 
@@ -51,14 +73,90 @@ const PAGE_HUGE_ALIGN: usize = 256 * 1024;
 const SMALL_OBJ_SIZE_MAX: usize = SMALL_PAGE_SIZE / 4; // 16KiB
 const MEDIUM_OBJ_SIZE_MAX: usize = MEDIUM_PAGE_SIZE / 4; // 128KiB
 const LARGE_OBJ_SIZE_MAX: usize = LARGE_PAGE_SIZE / 2; // 2MiB
-const LARGE_OBJ_WSIZE_MAX: usize = LARGE_OBJ_SIZE_MAX / PTR_SIZE;
+const LARGE_OBJ_WSIZE_MAX: usize = LARGE_OBJ_SIZE_MAX / WORD_SIZE;
 
 const MAX_SLICE_SHIFT: usize = 6; // at most 64 slices
 const MAX_SLICES: usize = 1 << MAX_SLICE_SHIFT;
 const MIN_SLICES: usize = 2;
 
 const SMALL_WSIZE_MAX: usize = 128;
-const SMALL_SIZE_MAX: usize = SMALL_WSIZE_MAX * PTR_SIZE;
+const SMALL_SIZE_MAX: usize = SMALL_WSIZE_MAX * WORD_SIZE;
+
+/// A raw pointer which is non null. It implements `Deref` for convenience.
+/// `A` may specify additional invariants.
+#[repr(transparent)]
+struct Ptr<T, A = ()> {
+    ptr: NonNull<T>,
+    phantom: PhantomData<A>,
+}
+
+impl<T, A> Debug for Ptr<T, A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.ptr.as_ptr().fmt(f)
+    }
+}
+
+impl<T, A> Copy for Ptr<T, A> {}
+impl<T, A> Clone for Ptr<T, A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T, A> PartialEq for Ptr<T, A> {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+    }
+}
+
+impl<T, A> Deref for Ptr<T, A> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.ptr.as_ref() }
+    }
+}
+
+impl<T, A> Ptr<T, A> {
+    pub unsafe fn new(ptr: *mut T) -> Option<Self> {
+        (!ptr.is_null()).then(|| Self::new_unchecked(ptr))
+    }
+
+    pub const unsafe fn new_unchecked(ptr: *mut T) -> Self {
+        Self {
+            ptr: NonNull::new_unchecked(ptr),
+            phantom: PhantomData,
+        }
+    }
+
+    pub const fn as_ptr(self) -> *mut T {
+        self.ptr.as_ptr()
+    }
+
+    pub fn as_maybe_null_ptr(this: Option<Ptr<T, A>>) -> *mut T {
+        this.map(|result| result.as_ptr()).unwrap_or(null_mut())
+    }
+
+    pub fn addr(self) -> usize {
+        self.ptr.as_ptr().addr()
+    }
+
+    pub const unsafe fn cast<U>(self) -> Ptr<U, A> {
+        Ptr::new_unchecked(self.as_ptr() as *mut U)
+    }
+
+    pub unsafe fn map_addr(self, f: impl FnOnce(usize) -> usize) -> Self {
+        Self::new_unchecked(self.as_ptr().with_addr(f(self.as_ptr().addr())))
+    }
+}
+
+#[inline(always)]
+const fn rem(lhs: usize, rhs: NonZeroUsize) -> usize {
+    match lhs.checked_rem(rhs.get()) {
+        Some(r) => r,
+        None => unsafe { unreachable_unchecked() },
+    }
+}
 
 #[inline(always)]
 const fn align_down(val: usize, align: usize) -> usize {
@@ -75,11 +173,11 @@ const fn align_up(val: usize, align: usize) -> usize {
 /// Returns the number of words in `size` rounded up.
 #[inline(always)]
 const fn word_count(size: usize) -> usize {
-    align_up(size, PTR_SIZE) / PTR_SIZE
+    align_up(size, WORD_SIZE) / WORD_SIZE
 }
 
 #[inline(always)]
-unsafe fn index_array<T, const S: usize>(array: *mut [T; S], index: usize) -> *mut T {
+unsafe fn index_array<T, const S: usize>(array: *const [T; S], index: usize) -> *const T {
     debug_assert!(index < S);
     unsafe { array.cast::<T>().add(index) }
 }
@@ -92,7 +190,7 @@ fn bin_index(size: usize) -> usize {
     } else if w <= 8 {
         w
     } else if w > LARGE_OBJ_WSIZE_MAX {
-        BINS
+        BIN_HUGE
     } else {
         let w = w - 1;
         // find the highest bit
@@ -110,9 +208,9 @@ fn bin_index(size: usize) -> usize {
 /// "bit scan reverse": Return index of the highest bit (or PTR_BITS if `x` is zero)
 const fn bit_scan_reverse(x: usize) -> usize {
     if x == 0 {
-        PTR_BITS
+        mem::size_of::<usize>() * 8
     } else {
-        PTR_BITS - 1 - x.leading_zeros() as usize
+        mem::size_of::<usize>() * 8 - 1 - x.leading_zeros() as usize
     }
 }
 
@@ -121,31 +219,7 @@ thread_local! {
         UnsafeCell::new(Heap::INITIAL)
     };
 }
-
-#[cfg(windows)]
-mod thread_exit {
-    use crate::{heap::Heap, with_heap};
-    use core::ptr::read_volatile;
-    use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_DETACH, DLL_THREAD_DETACH};
-
-    // FIXME: Apparently this trick doesn't work for loaded DLLs.
-    // The callback runs before main, so we could dynamically use another solution in DLLs?
-
-    // Use the `.CRT$XLM` section as that us executed
-    // later then the `.CRT$XLB` section used by `std`.
-    #[link_section = ".CRT$XLM"]
-    #[used]
-    static THREAD_CALLBACK: unsafe extern "system" fn(*mut (), u32, *mut ()) = callback;
-
-    pub fn register_thread() {}
-
-    unsafe extern "system" fn callback(_h: *mut (), dw_reason: u32, _pv: *mut ()) {
-        if dw_reason == DLL_THREAD_DETACH || dw_reason == DLL_PROCESS_DETACH {
-            with_heap(|heap| Heap::done(heap));
-        }
-    }
-}
-
+/*
 #[cfg(miri)]
 mod thread_exit {
     use crate::{heap::Heap, with_heap};
@@ -165,9 +239,9 @@ mod thread_exit {
         THREAD_EXIT.with(|_| {});
     }
 }
-
-fn with_heap<R>(f: impl FnOnce(*mut Heap) -> R) -> R {
-    LOCAL_HEAP.with(|heap| f(heap.get()))
+*/
+fn with_heap<R>(f: impl FnOnce(Ptr<Heap>) -> R) -> R {
+    LOCAL_HEAP.with(|heap| f(unsafe { Ptr::new_unchecked(heap.get()) }))
 }
 
 #[inline]
@@ -188,7 +262,7 @@ pub struct Alloc;
 
 #[inline]
 fn fallback_alloc(layout: Layout) -> bool {
-    layout.size() > SMALL_ALLOC || layout.align() > PTR_SIZE
+    false // layout.align() > WORD_SIZE || layout.size() > LARGE_OBJ_SIZE_MAX
 }
 
 #[inline]
@@ -219,71 +293,57 @@ fn compare_exchange_weak_release<T>(
     false
 }
 
-#[inline(never)]
-unsafe fn free_generic(segment: *mut Segment, page: *mut Page, is_local: bool, ptr: *mut u8) {
-    // FIXME: `flags` Can race with other threads
-    let block = if Page::flags(page).contains(PageFlags::HAS_ALIGNED) {
-        Page::unalign_pointer(page, segment, ptr)
-    } else {
-        ptr.cast()
-    };
+struct AbortOnPanic;
 
-    Page::free_block(page, is_local, block);
+impl Drop for AbortOnPanic {
+    #[inline]
+    fn drop(&mut self) {
+        panic!("panic in allocator");
+    }
 }
 
 #[inline]
-unsafe fn free(ptr: *mut u8) {
-    let segment = Segment::from_pointer_checked(ptr);
-    let is_local = Segment::is_local(segment);
-    let page = Segment::page_from_pointer(segment, ptr);
+fn abort_on_panic<R>(f: impl FnOnce() -> R) -> R {
+    let guard = AbortOnPanic;
+    let result = f();
+    mem::forget(guard);
+    result
+}
 
-    if likely(is_local) {
-        // thread-local free?
-        if likely(Page::flags(page) == PageFlags::empty())
-        // and it is not a full page (full pages need to move from the full bin), nor has aligned blocks (aligned blocks need to be unaligned)
-        {
-            let block: *mut Block = ptr.cast();
-
-            // mi_check_padding(page, block);
-            (*block).next = (*page).local_free;
-            (*page).local_free = block;
-            (*page).used -= 1;
-            if unlikely((*page).used == 0) {
-                Page::retire(page);
-            }
-        } else {
-            // page is full or contains (inner) aligned blocks; use generic path
-            free_generic(segment, page, true, ptr);
-        }
+#[inline]
+pub unsafe fn alloc(layout: Layout) -> *mut u8 {
+    if likely(!fallback_alloc(layout)) {
+        let result = with_heap(|heap| Whole::as_maybe_null_ptr(Heap::alloc(heap, layout)));
+        // `result` may be null due to oom or if the heap
+        // is abandoned and later TLS destructors allocate.
+        debug_assert!(result.is_aligned_to(layout.align()));
+        result.cast()
     } else {
-        // not thread-local; use generic path
-        free_generic(segment, page, false, ptr);
+        System.alloc(layout)
+    }
+}
+
+#[inline]
+pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
+    debug_assert!(!ptr.is_null());
+    debug_assert!(ptr.is_aligned_to(layout.align()));
+    debug_assert!(layout.size() > 0);
+
+    if likely(!fallback_alloc(layout)) {
+        Heap::free(Whole::new_unchecked(ptr.cast()))
+    } else {
+        System.dealloc(ptr, layout)
     }
 }
 
 unsafe impl GlobalAlloc for Alloc {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if likely(!fallback_alloc(layout)) {
-            let result = with_heap(|heap| Heap::alloc_small(heap, layout));
-            // `result` may be null due to oom or if the heap
-            // is abandoned and later TLS destructors allocate.
-            debug_assert!(result.is_aligned_to(layout.align()));
-            result
-        } else {
-            System.alloc(layout)
-        }
+        abort_on_panic(|| alloc(layout))
     }
 
     #[inline]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        debug_assert!(!ptr.is_null());
-        debug_assert!(ptr.is_aligned_to(layout.align()));
-
-        if likely(!fallback_alloc(layout)) {
-            free(ptr)
-        } else {
-            System.dealloc(ptr, layout)
-        }
+        abort_on_panic(|| dealloc(ptr, layout));
     }
 }

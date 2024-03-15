@@ -1,20 +1,22 @@
-use crate::page::{Block, DelayedMode, Page, PageQueue};
-use crate::segment::SegmentThreadData;
-use crate::thread_exit::register_thread;
+use crate::page::{AllocatedBlock, DelayedMode, FreeBlock, Page, PageFlags, PageKind, PageQueue};
+use crate::segment::{Segment, SegmentThreadData, Whole, WholeOrStatic};
 use crate::{
     bin_index, compare_exchange_weak_acq_rel, compare_exchange_weak_release, index_array,
-    is_main_thread, word_count, yield_now, BINS, BIN_FULL, LARGE_OBJ_SIZE_MAX, LARGE_OBJ_WSIZE_MAX,
-    PTR_SIZE, SMALL_ALLOC, SMALL_ALLOC_WORDS,
+    is_main_thread, system, word_count, yield_now, Ptr, BINS, BIN_FULL, BIN_FULL_BLOCK_SIZE,
+    BIN_HUGE, BIN_HUGE_BLOCK_SIZE, LARGE_OBJ_SIZE_MAX, LARGE_OBJ_WSIZE_MAX, SMALL_ALLOC,
+    SMALL_ALLOC_WORDS, SMALL_SIZE_MAX, WORD_SIZE,
 };
 use core::{alloc::Layout, intrinsics::unlikely, ptr::null_mut};
+use std::cell::{Cell, UnsafeCell};
+use std::intrinsics::likely;
 use std::ptr::{addr_of, addr_of_mut};
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 // Thread local data
 
 #[derive(Debug)]
 pub struct ThreadData {
-    heartbeat: usize, // monotonic heartbeat count
+    // heartbeat: usize, // monotonic heartbeat count
     //  bool                recurse;       // true if deferred was called; used to prevent infinite recursion.
     //  mi_heap_t*          heap_backing;  // backing heap of this thread (cannot be deleted)
     //  mi_heap_t*          heaps;         // list of heaps in this thread (so we can abandon all when the thread terminates)
@@ -23,12 +25,12 @@ pub struct ThreadData {
 
 impl ThreadData {
     const INITIAL: ThreadData = ThreadData {
-        heartbeat: 0,
+        //  heartbeat: 0,
         segment: SegmentThreadData::INITIAL,
     };
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 enum HeapState {
     Uninit,
     Active,
@@ -36,40 +38,42 @@ enum HeapState {
 }
 
 #[derive(Debug)]
+#[repr(C)]
 pub struct Heap {
-    pub thread_data: ThreadData,
-
-    state: HeapState,
-
     /// optimize: array where every entry points a page with possibly free blocks in the corresponding queue for that size.
-    pub pages_free: [*mut Page; SMALL_ALLOC_WORDS + 1],
+    // FIXME: Use Cell in the array
+    pub pages_free: UnsafeCell<[WholeOrStatic<Page>; SMALL_ALLOC_WORDS + 1]>,
+
+    pub thread_data: UnsafeCell<ThreadData>,
+
+    state: Cell<HeapState>,
 
     /// queue of pages for each size class (or "bin")
     pub page_queues: [PageQueue; BIN_FULL + 1],
 
-    pub thread_delayed_free: AtomicPtr<Block>,
+    pub thread_delayed_free: AtomicPtr<FreeBlock>,
 
-    pub page_retired_min: usize, // smallest retired index (retired pages are fully free, but still in the page queues)
-    pub page_retired_max: usize, // largest retired index into the `pages` array.
-    pub page_count: usize,       // total number of pages in the `pages` queues.
-    no_reclaim: bool,            // `true` if this heap should not reclaim abandoned pages
+    pub page_retired_min: Cell<usize>, // smallest retired index (retired pages are fully free, but still in the page queues)
+    pub page_retired_max: Cell<usize>, // largest retired index into the `pages` array.
+    pub page_count: Cell<usize>,       // total number of pages in the `page_queues` queues.
+    no_reclaim: Cell<bool>,            // `true` if this heap should not reclaim abandoned pages
 
-                                 /*
-                                   mi_tld_t*             tld;
-                                   mi_page_t*            pages_free_direct[MI_PAGES_DIRECT];  // optimize: array where every entry points a page with possibly free blocks in the corresponding queue for that size.
-                                   mi_page_queue_t       pages[MI_BIN_FULL + 1];              // queue of pages for each size class (or "bin")
-                                   _Atomic(mi_block_t*)  thread_delayed_free;
-                                   mi_threadid_t         thread_id;                           // thread this heap belongs too
-                                   mi_arena_id_t         arena_id;                            // arena id if the heap belongs to a specific arena (or 0)
-                                   uintptr_t             cookie;                              // random cookie to verify pointers (see `_mi_ptr_cookie`)
-                                   uintptr_t             keys[2];                             // two random keys used to encode the `thread_delayed_free` list
-                                   mi_random_ctx_t       random;                              // random number context used for secure allocation
-                                   size_t                page_count;                          // total number of pages in the `pages` queues.
-                                   size_t                page_retired_min;                    // smallest retired index (retired pages are fully free, but still in the page queues)
-                                   size_t                page_retired_max;                    // largest retired index into the `pages` array.
-                                   mi_heap_t*            next;                                // list of heaps per thread
-                                   bool                  no_reclaim;                          // `true` if this heap should not reclaim abandoned pages
-                                 */
+                                       /*
+                                         mi_tld_t*             tld;
+                                         mi_page_t*            pages_free_direct[MI_PAGES_DIRECT];  // optimize: array where every entry points a page with possibly free blocks in the corresponding queue for that size.
+                                         mi_page_queue_t       pages[MI_BIN_FULL + 1];              // queue of pages for each size class (or "bin")
+                                         _Atomic(mi_block_t*)  thread_delayed_free;
+                                         mi_threadid_t         thread_id;                           // thread this heap belongs too
+                                         mi_arena_id_t         arena_id;                            // arena id if the heap belongs to a specific arena (or 0)
+                                         uintptr_t             cookie;                              // random cookie to verify pointers (see `_mi_ptr_cookie`)
+                                         uintptr_t             keys[2];                             // two random keys used to encode the `thread_delayed_free` list
+                                         mi_random_ctx_t       random;                              // random number context used for secure allocation
+                                         size_t                page_count;                          // total number of pages in the `pages` queues.
+                                         size_t                page_retired_min;                    // smallest retired index (retired pages are fully free, but still in the page queues)
+                                         size_t                page_retired_max;                    // largest retired index into the `pages` array.
+                                         mi_heap_t*            next;                                // list of heaps per thread
+                                         bool                  no_reclaim;                          // `true` if this heap should not reclaim abandoned pages
+                                       */
 }
 
 /*
@@ -96,7 +100,7 @@ pub struct Heap {
 */
 
 const fn queue(size: usize) -> PageQueue {
-    PageQueue::new(size * PTR_SIZE)
+    PageQueue::new(size * WORD_SIZE)
 }
 
 const PAGE_QUEUES_INITIAL: [PageQueue; BIN_FULL + 1] = [
@@ -160,23 +164,29 @@ const PAGE_QUEUES_INITIAL: [PageQueue; BIN_FULL + 1] = [
     queue(40960),
     queue(49152),
     queue(57344),
-    queue(65536),
+    queue(65536), // 1 MB block size
+    /*
     queue(81920),
     queue(98304),
     queue(114688),
-    queue(131072), /* 64 */
-    queue(163840),
-    queue(196608),
-    queue(229376),
-    queue(262144),
+    queue(131072), // 2 MB block size  64
+    */
     /*
+        // 16 byte word size (65 bins)
+        queue(163840),
+        queue(196608),
+        queue(229376),
+        queue(262144), // 8 byte word size (69 bins)
+     */
+    /*
+        // Is this for smaller word sizes?
         queue(327680),
         queue(393216),
          queue(458752),
          queue(524288), /* 72 */
     */
-    queue(LARGE_OBJ_WSIZE_MAX + 1 /* 655360, Huge queue */),
-    queue(LARGE_OBJ_WSIZE_MAX + 2), /* Full queue */
+    queue(BIN_HUGE_BLOCK_SIZE / WORD_SIZE), /* 655360, Huge queue */
+    queue(BIN_FULL_BLOCK_SIZE / WORD_SIZE), /* Full queue */
 ];
 
 #[derive(PartialEq, PartialOrd)]
@@ -189,25 +199,31 @@ enum Collect {
 impl Heap {
     #[allow(clippy::declare_interior_mutable_const)]
     pub const INITIAL: Heap = Heap {
-        state: HeapState::Uninit,
-        pages_free: [Page::EMPTY_PTR; SMALL_ALLOC_WORDS + 1],
+        state: Cell::new(HeapState::Uninit),
+        pages_free: UnsafeCell::new(
+            [unsafe { WholeOrStatic::new_unchecked(Page::EMPTY_PTR) }; SMALL_ALLOC_WORDS + 1],
+        ),
         page_queues: PAGE_QUEUES_INITIAL,
-        page_retired_min: 0,
-        page_retired_max: 0,
-        page_count: 0,
-        thread_data: ThreadData::INITIAL,
+        page_retired_min: Cell::new(0),
+        page_retired_max: Cell::new(0),
+        page_count: Cell::new(0),
+        thread_data: UnsafeCell::new(ThreadData::INITIAL),
         thread_delayed_free: AtomicPtr::new(null_mut()),
-        no_reclaim: false,
+        no_reclaim: Cell::new(false),
     };
 
-    unsafe fn delayed_free_all(heap: *mut Heap) {
+    pub unsafe fn thread_data(&self) -> &mut ThreadData {
+        &mut *self.thread_data.get()
+    }
+
+    unsafe fn delayed_free_all(heap: Ptr<Heap>) {
         while (!Heap::delayed_free_partial(heap)) {
             yield_now();
         }
     }
 
     // returns true if all delayed frees were processed
-    unsafe fn delayed_free_partial(heap: *mut Heap) -> bool {
+    unsafe fn delayed_free_partial(heap: Ptr<Heap>) -> bool {
         // take over the list (note: no atomic exchange since it is often NULL)
         let mut block = (*heap).thread_delayed_free.load(Ordering::Relaxed);
         while !block.is_null()
@@ -218,16 +234,16 @@ impl Heap {
 
         // and free them all
         while (!block.is_null()) {
-            let next = (*block).next;
+            let next = (*block).next.get();
             // use internal free instead of regular one to keep stats etc correct
-            if (!Page::free_delayed_block(block)) {
+            if (!Page::free_delayed_block(Whole::new_unchecked(block))) {
                 // we might already start delayed freeing while another thread has not yet
                 // reset the delayed_freeing flag; in that case delay it further by reinserting the current block
                 // into the delayed free list
                 all_freed = false;
                 let mut dfree = (*heap).thread_delayed_free.load(Ordering::Relaxed);
                 loop {
-                    (*block).next = dfree;
+                    (*block).next.set(Whole::new(dfree));
                     if compare_exchange_weak_release(
                         &(*heap).thread_delayed_free,
                         &mut dfree,
@@ -237,29 +253,28 @@ impl Heap {
                     }
                 }
             }
-            block = next;
+            block = Whole::as_maybe_null_ptr(next);
         }
         all_freed
     }
 
     // Visit all pages in a heap; returns `false` if break was called.
     unsafe fn visit_pages(
-        heap: *mut Heap,
-        mut visitor: impl FnMut(*mut Page, *mut PageQueue) -> bool,
+        heap: Ptr<Heap>,
+        mut visitor: impl FnMut(Whole<Page>, Ptr<PageQueue>) -> bool,
     ) -> bool {
-        debug_assert!(!heap.is_null());
-        if (*heap).page_count == 0 {
+        if (*heap).page_count.get() == 0 {
             return false;
         }
 
         // visit all pages
-        let total = (*heap).page_count;
+        let total = (*heap).page_count.get();
         let mut count = 0;
 
         for i in 0..=BIN_FULL {
             let queue = Heap::page_queue(heap, i);
             for page in (*queue).list.iter(Page::node) {
-                debug_assert!(Page::heap(page) == heap);
+                debug_assert!((*page).heap() == Some(heap));
                 if !visitor(page, queue) {
                     return false;
                 }
@@ -271,30 +286,32 @@ impl Heap {
     }
 
     #[inline]
-    pub unsafe fn done(heap: *mut Heap) {
-        debug_assert!(!heap.is_null());
-        debug_assert!((*heap).state == HeapState::Active);
+    pub unsafe fn done(heap: Ptr<Heap>) {
+        if (*heap).state.get() == HeapState::Uninit {
+            return;
+        }
+
+        debug_assert!((*heap).state.get() == HeapState::Active);
 
         // collect if not the main / final thread (as in we're immediately going to exit)
         Heap::collect(heap, Collect::Abandon);
 
-        (*heap) = Heap::INITIAL;
-        (*heap).state = HeapState::Abandoned;
+        (*heap.as_ptr()) = Heap::INITIAL;
+        (*heap).state.set(HeapState::Abandoned);
     }
 
     #[inline]
-    pub unsafe fn page_queue(heap: *mut Heap, bin: usize) -> *mut PageQueue {
-        index_array(addr_of_mut!((*heap).page_queues), bin)
+    pub unsafe fn page_queue(heap: Ptr<Heap>, bin: usize) -> Ptr<PageQueue> {
+        Ptr::new_unchecked(index_array(&heap.page_queues, bin).cast_mut())
     }
 
     #[inline]
-    unsafe fn collect(heap: *mut Heap, collect: Collect) {
-        debug_assert!(!heap.is_null());
-        debug_assert!((*heap).state == HeapState::Active);
+    unsafe fn collect(heap: Ptr<Heap>, collect: Collect) {
+        debug_assert!((*heap).state.get() == HeapState::Active);
 
         // if (heap==NULL || !mi_heap_is_initialized(heap)) return;
 
-        (*heap).thread_data.heartbeat += 1;
+        // (*heap).thread_data.heartbeat += 1;
 
         /*
                 // note: never reclaim on collect but leave it to threads that need storage to reclaim
@@ -318,7 +335,7 @@ impl Heap {
 
         if cfg!(debug_assertions) {
             Heap::visit_pages(heap, |page, _| {
-                assert!(Page::thread_free_flag(page) == DelayedMode::NeverDelayedFree);
+                assert!((*page).thread_free_flag() == DelayedMode::NeverDelayedFree);
                 true
             });
         }
@@ -334,7 +351,7 @@ impl Heap {
         Heap::visit_pages(heap, |page, queue| {
             //mi_assert_internal(mi_heap_page_is_valid(heap, pq, page, NULL, NULL));
             Page::free_collect(page, collect >= Collect::Force);
-            if (Page::all_free(page)) {
+            if (page.all_free()) {
                 // no more used blocks, free the page.
                 // note: this will free retired pages as well.
                 Page::free(page, queue, collect >= Collect::Force);
@@ -369,33 +386,35 @@ impl Heap {
 
     // free retired pages: we don't need to look at the entire queues
     // since we only retire pages that are at the head position in a queue.
-    pub unsafe fn collect_retired(heap: *mut Heap, force: bool) {
+    pub unsafe fn collect_retired(heap: Ptr<Heap>, force: bool) {
         let mut min = BIN_FULL;
         let mut max = 0;
-        for bin in (*heap).page_retired_min..=(*heap).page_retired_max {
+        for bin in (*heap).page_retired_min.get()..=(*heap).page_retired_max.get() {
             let queue = Heap::page_queue(heap, bin);
-            let page = (*queue).list.first;
-            if !page.is_null() && (*page).retire_expire != 0 {
-                if Page::all_free(page) {
-                    (*page).retire_expire -= 1;
-                    if force || (*page).retire_expire == 0 {
-                        Page::free((*queue).list.first, queue, force);
+            let page = (*queue).list.first.get();
+            if let Some(page) = page {
+                if page.retire_expire.get() != 0 {
+                    if page.all_free() {
+                        page.retire_expire.set(page.retire_expire.get() - 1);
+                        if force || page.retire_expire.get() == 0 {
+                            Page::free(page, queue, force);
+                        } else {
+                            // keep retired, update min/max
+                            if bin < min {
+                                min = bin;
+                            }
+                            if bin > max {
+                                max = bin;
+                            }
+                        }
                     } else {
-                        // keep retired, update min/max
-                        if bin < min {
-                            min = bin;
-                        }
-                        if bin > max {
-                            max = bin;
-                        }
+                        page.retire_expire.set(0);
                     }
-                } else {
-                    (*page).retire_expire = 0;
                 }
             }
         }
-        (*heap).page_retired_min = min;
-        (*heap).page_retired_max = max;
+        (*heap).page_retired_min.set(min);
+        (*heap).page_retired_max.set(max);
     }
 
     // The current small page array is for efficiency and for each
@@ -404,23 +423,24 @@ impl Heap {
     // current free page queue is updated for a small bin, we need to update a
     // range of entries in `_mi_page_small_free`.
     #[inline]
-    pub unsafe fn queue_first_update(heap: *mut Heap, queue: *mut PageQueue) {
+    pub unsafe fn queue_first_update(heap: Ptr<Heap>, queue: Ptr<PageQueue>) {
         let size = (*queue).block_size;
         if size > SMALL_ALLOC {
             return;
         }
 
-        let mut page = (*queue).list.first;
-        if (*queue).list.first.is_null() {
-            page = Page::EMPTY_PTR;
-        }
+        let page = (*queue)
+            .list
+            .first
+            .get()
+            .unwrap_or(Whole::new_unchecked(Page::EMPTY_PTR));
 
         // find index in the right direct page array
         let mut start;
         let idx = word_count(size);
-        let pages_free = (*heap).pages_free.as_mut_ptr();
+        let pages_free = (*(*heap).pages_free.get()).as_mut_ptr();
 
-        if *pages_free.add(idx) == page {
+        if *pages_free.add(idx) == page.or_static() {
             return; // already set
         }
 
@@ -430,8 +450,8 @@ impl Heap {
         } else {
             // find previous size; due to minimal alignment upto 3 previous bins may need to be skipped
             let bin = bin_index(size);
-            let mut prev = queue.sub(1);
-            let first = (*heap).page_queues.as_mut_ptr();
+            let mut prev = queue.as_ptr().sub(1);
+            let first = (*heap).page_queues.as_ptr().cast_mut();
             while bin == bin_index((*prev).block_size) && prev > first {
                 prev = prev.sub(1);
             }
@@ -444,26 +464,33 @@ impl Heap {
         // set size range to the right page
         debug_assert!(start <= idx);
         for sz in start..=idx {
-            *pages_free.add(sz) = page;
+            *pages_free.add(sz) = page.or_static();
         }
     }
 
     #[inline]
-    pub unsafe fn page_queue_for_size(heap: *mut Heap, size: usize) -> *mut PageQueue {
-        let queue = Heap::page_queue(heap, bin_index(size));
+    pub unsafe fn page_queue_for_size(heap: Ptr<Heap>, size: usize) -> Ptr<PageQueue> {
+        let index = bin_index(size);
+        let queue = Heap::page_queue(heap, index);
+        if size > LARGE_OBJ_SIZE_MAX {
+            debug_assert!(BIN_HUGE == index);
+            debug_assert!((*queue).block_size == BIN_HUGE_BLOCK_SIZE);
+        } else {
+            debug_assert!((*queue).block_size <= LARGE_OBJ_SIZE_MAX);
+        }
         debug_assert!(size <= (*queue).block_size);
         queue
     }
 
     #[inline]
-    unsafe fn find_free_page(heap: *mut Heap, layout: Layout) -> *mut Page {
+    unsafe fn find_free_page(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<Page>> {
         let queue = Heap::page_queue_for_size(heap, layout.size());
-        let page = (*queue).list.first;
-        if !page.is_null() {
+        let page = (*queue).list.first.get();
+        if let Some(page) = page {
             Page::free_collect(page, false);
 
-            if Page::immediately_available(page) {
-                return page;
+            if page.immediately_available() {
+                return Some(page);
             }
         }
 
@@ -471,57 +498,149 @@ impl Heap {
     }
 
     #[inline]
-    unsafe fn find_page(heap: *mut Heap, layout: Layout) -> *mut Page {
-        // FIXME: Check large alignments
-        if unlikely(layout.size() > isize::MAX as usize) {
-            null_mut()
+    unsafe fn find_page(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<Page>> {
+        if unlikely(layout.size() > LARGE_OBJ_SIZE_MAX || layout.align() > WORD_SIZE) {
+            if unlikely(layout.size() > isize::MAX as usize) {
+                None
+            } else {
+                Heap::alloc_huge(heap, layout)
+            }
         } else {
             Heap::find_free_page(heap, layout)
         }
     }
 
+    #[inline(never)]
+    unsafe fn free_generic(
+        segment: Whole<Segment>,
+        page: Whole<Page>,
+        is_local: bool,
+        ptr: Whole<AllocatedBlock>,
+    ) {
+        let block = if (*page).flags().contains(PageFlags::HAS_ALIGNED) {
+            Page::unalign_pointer(page, segment, ptr)
+        } else {
+            ptr.cast()
+        };
+
+        Page::free_block(page, is_local, block);
+    }
+
     #[inline]
-    pub unsafe fn alloc_small(heap: *mut Heap, layout: Layout) -> *mut u8 {
-        let page = (*heap).pages_free[word_count(layout.size())];
+    pub unsafe fn free(ptr: Whole<AllocatedBlock>) {
+        let segment = Segment::from_pointer_checked(ptr);
+        let is_local = segment.is_local();
+        let page = Segment::page_from_pointer(segment, ptr);
+
+        // thread-local free?
+        if likely(is_local) {
+            if likely((*page).flags() == PageFlags::empty())
+            // and it is not a full page (full pages need to move from the full bin), nor has aligned blocks (aligned blocks need to be unaligned)
+            {
+                let block: Whole<FreeBlock> = ptr.cast();
+
+                // mi_check_padding(page, block);
+                page.local_deferred_free_blocks.push_front(block);
+                page.used.set(page.used.get() - 1);
+                if unlikely(page.used.get() == 0) {
+                    Page::retire(page);
+                }
+            } else {
+                // page is full or contains (inner) aligned blocks; use generic path
+                Heap::free_generic(segment, page, true, ptr);
+            }
+        } else {
+            // not thread-local; use generic path
+            Heap::free_generic(segment, page, false, ptr);
+        }
+    }
+
+    // A huge page is allocated directly without being in a queue.
+    // Because huge pages contain just one block, and the segment contains
+    // just that page, we always treat them as abandoned and any thread
+    // that frees the block can free the whole page and segment directly.
+    // Huge pages are also used if the requested alignment is very large (> MI_ALIGNMENT_MAX).
+    unsafe fn alloc_huge(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<Page>> {
+        let block_size = layout.size(); //_mi_os_good_alloc_size(size);
+        debug_assert!(bin_index(block_size) == BIN_HUGE || layout.align() > WORD_SIZE);
+
+        let pq = Heap::page_queue(heap, BIN_HUGE); // not block_size as that can be low if the page_alignment > 0
+        debug_assert!((*pq).is_huge());
+
+        let page = Page::fresh_alloc(heap, pq, block_size, layout.align());
+        if let Some(page) = page {
+            let bsize = Page::actual_block_size(page); // note: not `mi_page_usable_block_size` as `size` includes padding already
+            debug_assert!(bsize >= layout.size());
+            debug_assert!(page.immediately_available());
+            debug_assert!(Page::segment(page).page_kind == PageKind::Huge);
+            debug_assert!(Page::segment(page).used.get() == 1);
+        }
+        page
+    }
+
+    #[inline]
+    pub unsafe fn alloc_small(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<AllocatedBlock>> {
+        let page = (*(*heap).pages_free.get())[word_count(layout.size())];
         Page::alloc(page, layout, heap)
     }
 
-    #[inline(never)]
-    pub unsafe fn alloc_slow(heap: *mut Heap, layout: Layout) -> *mut u8 {
-        match (*heap).state {
-            HeapState::Abandoned => {
-                // allocation from an abandoned heap
-                return null_mut();
-            }
-            HeapState::Uninit => {
-                // Register a thread exit callback.
-                register_thread();
-
-                (*heap).state = HeapState::Active;
-            }
-            HeapState::Active => {}
+    #[inline]
+    pub unsafe fn alloc(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<AllocatedBlock>> {
+        if likely(layout.size() <= SMALL_SIZE_MAX && layout.align() <= WORD_SIZE) {
+            // FIXME: Check alignment
+            Heap::alloc_small(heap, layout)
+        } else {
+            // FIXME: Add `mi_heap_malloc_zero_aligned_at_fallback` fallback for alignment
+            Heap::alloc_slow(heap, layout)
         }
+    }
+
+    pub unsafe fn init(heap: Ptr<Heap>) {
+        // Register a thread exit callback.
+        system::register_thread();
+    }
+
+    #[inline(never)]
+    pub unsafe fn alloc_slow(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<AllocatedBlock>> {
+        if unlikely((*heap).state.get() != HeapState::Active) {
+            match (*heap).state.get() {
+                HeapState::Abandoned => {
+                    // allocation from an abandoned heap
+                    return None;
+                }
+                HeapState::Uninit => {
+                    Heap::init(heap);
+                    (*heap).state.set(HeapState::Active);
+                }
+                HeapState::Active => {}
+            }
+        }
+
+        // free delayed frees from other threads (but skip contended ones)
+        Heap::delayed_free_partial(heap);
 
         let mut page = Heap::find_page(heap, layout);
 
-        if page.is_null() {
+        if page.is_none() {
             Heap::collect(heap, Collect::Force);
             page = Heap::find_page(heap, layout);
         }
 
-        if unlikely(page.is_null()) {
+        if unlikely(page.is_none()) {
             // Out of memory
-            return null_mut();
+            return None;
         }
+        let page = page.unwrap_unchecked();
 
-        debug_assert!(Page::immediately_available(page));
-        debug_assert!(Page::block_size(page) >= layout.size());
+        debug_assert!(page.immediately_available());
+        debug_assert!(Page::actual_block_size(page) >= layout.size());
 
-        Page::alloc(page, layout, heap)
+        Page::alloc_free(page.or_static())
     }
 }
 
 #[test]
+#[cfg(not(debug_assertions))]
 fn bin_indices() {
     let queues = PAGE_QUEUES_INITIAL;
 
@@ -544,4 +663,22 @@ fn bin_indices() {
         // We must be above the size of the lower bin
         assert!(index <= 1 || size > queues[index - 1].block_size);
     }
+}
+
+#[test]
+fn bin_special_indices() {
+    let queues = PAGE_QUEUES_INITIAL;
+
+    let huge = queues.len() - 2;
+    let full = queues.len() - 1;
+
+    assert_eq!(huge, BIN_HUGE);
+    assert_eq!(full, BIN_FULL);
+
+    assert_eq!(queues[huge].block_size, BIN_HUGE_BLOCK_SIZE);
+    assert_eq!(queues[full].block_size, BIN_FULL_BLOCK_SIZE);
+
+    assert_eq!(bin_index(BIN_HUGE_BLOCK_SIZE), BIN_HUGE);
+    assert_eq!(bin_index(LARGE_OBJ_SIZE_MAX + 1), BIN_HUGE);
+    assert_eq!(bin_index(LARGE_OBJ_SIZE_MAX), BIN_HUGE - 1);
 }
