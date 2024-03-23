@@ -12,6 +12,10 @@ impl<T: Copy> Node<T> {
         prev: Cell::new(None),
         next: Cell::new(None),
     };
+
+    pub unsafe fn used(&self) -> bool {
+        self.prev.get().is_none() && self.next.get().is_none()
+    }
 }
 
 #[derive(Debug)]

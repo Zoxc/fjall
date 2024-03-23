@@ -1,22 +1,37 @@
-use crate::alloc;
-use crate::segment::ALIGNMENT_MAX;
+use crate::{
+    alloc, MEDIUM_ALIGN_MAX, MEDIUM_ALIGN_MAX_SIZE, MEDIUM_OBJ_SIZE_MAX, SMALL_OBJ_SIZE_MAX,
+};
 use crate::{dealloc, LARGE_OBJ_SIZE_MAX};
 use std::alloc::Layout;
+use std::cmp::{max, min};
+use std::ops::Sub;
 
-#[test]
-fn large_alloc() {
+fn test(size: usize, align: usize) {
     let layout = Layout::from_size_align(LARGE_OBJ_SIZE_MAX + 1, 1).unwrap();
     unsafe {
-        let huge = alloc(layout);
-        dealloc(huge, layout);
+        let ptr = alloc(layout);
+        assert!(!ptr.is_null());
+        dealloc(ptr, layout);
     }
 }
 
+fn test_align(size: usize) {
+    test(size, 1);
+    test(size, MEDIUM_ALIGN_MAX);
+    test(size, MEDIUM_ALIGN_MAX + 1);
+}
+
+fn test_size(size: usize) {
+    test_align(max(size.sub(1), 1));
+    test_align(size);
+    test_align(min(size.saturating_add(1), isize::MAX as usize));
+}
+
 #[test]
-fn medium_align() {
-    let layout = Layout::from_size_align(1, ALIGNMENT_MAX).unwrap();
-    unsafe {
-        let huge = alloc(layout);
-        dealloc(huge, layout);
-    }
+fn allocs() {
+    test_size(1);
+    test_size(SMALL_OBJ_SIZE_MAX);
+    test_size(MEDIUM_OBJ_SIZE_MAX);
+    test_size(MEDIUM_ALIGN_MAX_SIZE);
+    test_size(LARGE_OBJ_SIZE_MAX);
 }

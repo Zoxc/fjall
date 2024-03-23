@@ -1,4 +1,9 @@
-#![feature(core_intrinsics, const_refs_to_static, pointer_is_aligned)]
+#![feature(
+    core_intrinsics,
+    const_refs_to_static,
+    pointer_is_aligned,
+    allocator_api
+)]
 #![allow(
     unstable_name_collisions,
     internal_features,
@@ -66,7 +71,10 @@ const MIN_EXTEND: usize = 1;
 
 const MAX_ALIGN_SIZE: usize = 16;
 
-const PAGE_HUGE_ALIGN: usize = 256 * 1024;
+/// The largest alignment which does not create dedicated huge pages.
+const MEDIUM_ALIGN_MAX: usize = 0x10000;
+/// The largest size for which we expand the size to align rather than create a huge page.
+const MEDIUM_ALIGN_MAX_SIZE: usize = LARGE_OBJ_SIZE_MAX - (MEDIUM_ALIGN_MAX - 1);
 
 // The max object size are checked to not waste more than 12.5% internally over the page sizes.
 // (Except for large pages since huge objects are allocated in 4MiB chunks)
@@ -116,6 +124,8 @@ impl<T, A> Deref for Ptr<T, A> {
         unsafe { self.ptr.as_ref() }
     }
 }
+
+unsafe impl<T, A> Send for Ptr<T, A> {}
 
 impl<T, A> Ptr<T, A> {
     pub unsafe fn new(ptr: *mut T) -> Option<Self> {
@@ -199,9 +209,9 @@ fn bin_index(size: usize) -> usize {
                                      // - adjust with 3 because we use do not round the first 8 sizes
                                      //   which each get an exact bin
 
-        let c = ((w >> (b.saturating_sub(2) as u32)) & 0x03);
+        let c = ((w >> ((b - 2) as u32)) & 0x03);
 
-        ((b << 2) + c).saturating_sub(3)
+        ((b << 2) + c) - 3
     }
 }
 

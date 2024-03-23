@@ -13,8 +13,8 @@ use std::{
 };
 use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_DETACH, DLL_THREAD_DETACH};
 
-// FIXME: Apparently this trick doesn't work for loaded DLLs.
-// The callback runs before main, so we could dynamically use another solution in DLLs?
+// Apparently this trick doesn't work for loaded DLLs, that but it works on Window 10 22H2.
+// Maybe it didn't work on some older Windows versions?
 
 // Use the `.CRT$XLM` section as that us executed
 // later then the `.CRT$XLB` section used by `std`.

@@ -5,8 +5,8 @@ use crate::page::{
     LARGE_PAGE_SIZE, MEDIUM_PAGE_SHIFT, MEDIUM_PAGE_SIZE, SMALL_PAGE_SIZE,
 };
 use crate::{
-    align_up, rem, segment, system, thread_id, Ptr, LARGE_OBJ_SIZE_MAX, MAX_ALIGN_SIZE,
-    MEDIUM_OBJ_SIZE_MAX, PAGE_HUGE_ALIGN, WORD_SIZE,
+    align_up, compare_exchange_weak_acq_rel, rem, segment, system, thread_id, Ptr,
+    LARGE_OBJ_SIZE_MAX, MAX_ALIGN_SIZE, MEDIUM_ALIGN_MAX, MEDIUM_OBJ_SIZE_MAX, WORD_SIZE,
 };
 use crate::{
     heap::Heap,
@@ -27,7 +27,8 @@ use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::ptr::NonNull;
 use std::slice::SliceIndex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::{mem, ptr};
 
 pub const SEGMENT_SHIFT: usize = 21; // 2MiB
@@ -40,9 +41,6 @@ const _: () = {
 pub const SEGMENT_SIZE: usize = 1 << SEGMENT_SHIFT;
 pub const SEGMENT_ALIGN: usize = SEGMENT_SIZE;
 pub const SEGMENT_MASK: usize = SEGMENT_ALIGN - 1;
-
-// Alignments over ALIGNMENT_MAX are allocated in dedicated huge page segments
-pub const ALIGNMENT_MAX: usize = SEGMENT_SIZE >> 1;
 
 pub const SMALL_PAGES_PER_SEGMENT: usize = SEGMENT_SIZE / SMALL_PAGE_SIZE;
 pub const MEDIUM_PAGES_PER_SEGMENT: usize = SEGMENT_SIZE / MEDIUM_PAGE_SIZE;
@@ -95,6 +93,15 @@ impl SegmentThreadData {
             PageKind::Medium => Some(&mut data.medium_free),
             _ => None,
         }
+    }
+
+    fn add_segment(&mut self) {
+        self.current_count += 1;
+        self.count = self.count.saturating_add(1);
+    }
+
+    fn remove_segment(&mut self) {
+        self.current_count -= 1;
     }
 }
 
@@ -275,6 +282,8 @@ impl Segment {
         *pre_size = 0;
         if let Some(non_zero_block_size) = NonZeroUsize::new(block_size) {
             if page.segment_idx == 0 && segment.page_kind <= PageKind::Medium {
+                debug_assert!(non_zero_block_size.get() <= LARGE_OBJ_SIZE_MAX);
+
                 // for small and medium objects, ensure the page start is aligned with the block size (PR#66 by kickunderscore)
                 let adjust = block_size - rem(p.addr(), non_zero_block_size);
                 if page_size - adjust >= block_size && adjust < block_size {
@@ -367,54 +376,150 @@ impl Segment {
         None
     }
 
-    unsafe fn try_reclaim(
-        _heap: Ptr<Heap>,
-        _block_size: usize,
-        _page_kind: PageKind,
-        reclaimed: &mut bool,
-        _data: *mut SegmentThreadData,
-    ) -> *mut Segment {
-        *reclaimed = false;
-        null_mut()
-        // FIXME:
-        /*
-        mi_segment_t* segment;
-        mi_arena_field_cursor_t current; _mi_arena_field_cursor_init(heap,&current);
-        long max_tries = mi_segment_get_reclaim_tries();
-        while ((max_tries-- > 0) && ((segment = _mi_arena_segment_clear_abandoned_next(&current)) != NULL))
-        {
-          segment->abandoned_visits++;
-          // todo: an arena exclusive heap will potentially visit many abandoned unsuitable segments
-          // and push them into the visited list and use many tries. Perhaps we can skip non-suitable ones in a better way?
-          bool is_suitable = _mi_heap_memid_is_suitable(heap, segment->memid);
-          bool all_pages_free;
-          bool has_page = mi_segment_check_free(segment,block_size,&all_pages_free); // try to free up pages (due to concurrent frees)
-          if (all_pages_free) {
-            // free the segment (by forced reclaim) to make it available to other threads.
-            // note1: we prefer to free a segment as that might lead to reclaiming another
-            // segment that is still partially used.
-            // note2: we could in principle optimize this by skipping reclaim and directly
-            // freeing but that would violate some invariants temporarily)
-            mi_segment_reclaim(segment, heap, 0, NULL, tld);
-          }
-          else if (has_page && segment->page_kind == page_kind && is_suitable) {
-            // found a free page of the right kind, or page of the right block_size with free space
-            // we return the result of reclaim (which is usually `segment`) as it might free
-            // the segment due to concurrent frees (in which case `NULL` is returned).
-            return mi_segment_reclaim(segment, heap, block_size, reclaimed, tld);
-          }
-          else if (segment->abandoned_visits >= 3 && is_suitable) {
-            // always reclaim on 3rd visit to limit the list length.
-            mi_segment_reclaim(segment, heap, 0, NULL, tld);
-          }
-          else {
-            // otherwise, mark it back as abandoned
-            // todo: reset delayed pages in the segment?
-            _mi_arena_segment_mark_abandoned(segment);
-          }
+    // Possibly clear pages and check if free space is available
+    unsafe fn check_free(segment: Whole<Segment>, block_size: usize) -> (bool, bool) {
+        debug_assert!(block_size <= LARGE_OBJ_SIZE_MAX);
+        let mut has_page = false;
+        let mut pages_used = 0;
+        let mut pages_used_empty = 0;
+        for i in 0..segment.capacity {
+            let page = Segment::page(segment, i);
+            if (page.segment_in_use.get()) {
+                pages_used += 1;
+                // ensure used count is up to date and collect potential concurrent frees
+                Page::free_collect(page, false);
+                if page.all_free() {
+                    // if everything free already, page can be reused for some block size
+                    // note: don't clear the page yet as we can only OS reset it once it is reclaimed
+                    pages_used_empty += 1;
+                    has_page = true;
+                } else if (page.block_size() == block_size && page.any_available()) {
+                    // a page has available free blocks of the right size
+                    has_page = true;
+                }
+            } else {
+                // whole empty page
+                has_page = true;
+            }
         }
-        return NULL;
-        */
+        debug_assert!(pages_used == segment.used.get() && pages_used >= pages_used_empty);
+        (has_page, ((pages_used - pages_used_empty) == 0))
+    }
+
+    // Reclaim a segment; returns NULL if the segment was freed
+    // set `right_page_reclaimed` to `true` if it reclaimed a page of the right `block_size` that was not full.
+    unsafe fn reclaim(
+        segment: Whole<Segment>,
+        heap: Ptr<Heap>,
+        requested_block_size: usize,
+        right_page_reclaimed: &mut bool,
+        data: &mut SegmentThreadData,
+    ) -> Option<Whole<Segment>> {
+        *right_page_reclaimed = false;
+
+        // can be 0 still with abandoned_next, or already a thread id for segments outside an arena that are reclaimed on a free.
+        debug_assert!(
+            segment.thread_id.load(Ordering::Relaxed) == 0
+                || segment.thread_id.load(Ordering::Relaxed) == thread_id()
+        );
+        segment.thread_id.store(thread_id(), Ordering::Release);
+        segment.abandoned_visits.set(0);
+        segment.was_reclaimed.set(true);
+        data.reclaim_count += 1;
+        data.add_segment();
+        debug_assert!(!segment.node.used());
+        //mi_assert_expensive(mi_segment_is_valid(segment, tld));
+        //_mi_stat_decrease(&tld.stats.segments_abandoned, 1);
+
+        for i in 0..segment.capacity {
+            let page = Segment::page(segment, i);
+            if (page.segment_in_use.get()) {
+                debug_assert!(page.is_committed.get());
+                debug_assert!(!page.node.used());
+                debug_assert!(page.thread_free_flag() == DelayedMode::NeverDelayedFree);
+                debug_assert!(page.heap().is_none());
+                segment.abandoned.set(segment.abandoned.get() - 1);
+                //_mi_stat_decrease(&tld.stats.pages_abandoned, 1);
+                // set the heap again and allow heap thread delayed free again.
+                page.set_heap(Some(heap));
+                Page::use_delayed_free(page, DelayedMode::UseDelayedFree, true); // override never (after heap is set)
+                Page::free_collect(page, false); // ensure used count is up to date
+                if (page.all_free()) {
+                    // if everything free already, clear the page directly
+                    Segment::page_clear(segment, page, data); // reset is ok now
+                } else {
+                    // otherwise reclaim it into the heap
+                    Page::reclaim(page, heap);
+                    if (requested_block_size == page.block_size() && page.any_available()) {
+                        *right_page_reclaimed = true;
+                    }
+                }
+            }
+            /* expired
+            else if (page.is_committed) {  // not in-use, and not reset yet
+              // note: do not reset as this includes pages that were not touched before
+              // mi_pages_purge_add(segment, page, tld);
+            }
+            */
+        }
+        debug_assert!(segment.abandoned.get() == 0);
+        if (segment.used.get() == 0) {
+            debug_assert!(!(*right_page_reclaimed));
+            Segment::free(segment, data);
+            None
+        } else {
+            if (segment.page_kind <= PageKind::Medium && segment.has_free()) {
+                Segment::insert_in_free_queue(segment, data);
+            }
+            Some(segment)
+        }
+    }
+
+    unsafe fn try_reclaim(
+        heap: Ptr<Heap>,
+        block_size: usize,
+        page_kind: PageKind,
+        reclaimed: &mut bool,
+        data: &mut SegmentThreadData,
+    ) -> Option<Whole<Segment>> {
+        *reclaimed = false;
+
+        // FIXME: Limit segment tries.
+
+        let mut result = None;
+
+        walk_abandoned(|&segment| {
+            segment
+                .abandoned_visits
+                .set(segment.abandoned_visits.get() + 1);
+            // todo: an arena exclusive heap will potentially visit many abandoned unsuitable segments
+            // and push them into the visited list and use many tries. Perhaps we can skip non-suitable ones in a better way?
+            let (has_page, all_pages_free) = Segment::check_free(segment, block_size); // try to free up pages (due to concurrent frees)
+            if (all_pages_free) {
+                // free the segment (by forced reclaim) to make it available to other threads.
+                // note1: we prefer to free a segment as that might lead to reclaiming another
+                // segment that is still partially used.
+                // note2: we could in principle optimize this by skipping reclaim and directly
+                // freeing but that would violate some invariants temporarily)
+                Segment::reclaim(segment, heap, 0, &mut false, data);
+                false
+            } else if (has_page && segment.page_kind == page_kind) && result.is_none() {
+                // found a free page of the right kind, or page of the right block_size with free space
+                // we return the result of reclaim (which is usually `segment`) as it might free
+                // the segment due to concurrent frees (in which case `NULL` is returned).
+                result = Some(Segment::reclaim(segment, heap, block_size, reclaimed, data));
+                false
+            } else if (segment.abandoned_visits.get() >= 3) {
+                // always reclaim on 3rd visit to limit the list length.
+                Segment::reclaim(segment, heap, 0, &mut false, data);
+                false
+            } else {
+                // otherwise, mark it back as abandoned
+                // todo: reset delayed pages in the segment?
+                true
+            }
+        });
+        result.and_then(|r| r)
     }
 
     fn calculate_sizes(
@@ -507,8 +612,7 @@ impl Segment {
             return None;
         }
 
-        data.current_count += 1;
-        data.count = data.count.saturating_add(1);
+        data.add_segment();
 
         let cookie = cookie(segment);
 
@@ -560,28 +664,28 @@ impl Segment {
         data: &mut SegmentThreadData,
     ) -> Option<Whole<Segment>> {
         debug_assert!(page_kind <= PageKind::Large);
-        debug_assert!(block_size <= LARGE_OBJ_SIZE_MAX as usize);
-
+        debug_assert!(block_size <= LARGE_OBJ_SIZE_MAX);
         // FIXME:?
-        /*
+
         // 1. try to reclaim an abandoned segment
         let mut reclaimed = false;
         let segment = Segment::try_reclaim(heap, block_size, page_kind, &mut reclaimed, data);
         // debug_assert!(segment.is_null() || _mi_arena_memid_is_suitable(segment->memid, heap->arena_id));
         if reclaimed {
             // reclaimed the right page right into the heap
-            debug_assert!(
+            // FIXME
+            /*     debug_assert!(
                 !segment.is_null()
                     && (*segment).page_kind == page_kind
                     && page_kind <= PageKind::Large
-            );
-            return null_mut(); // pretend out-of-memory as the page will be in the page queue of the heap with available blocks
-        } else if !segment.is_null() {
+            );*/
+            return None; // pretend out-of-memory as the page will be in the page queue of the heap with available blocks
+        } else if let Some(segment) = segment {
             // reclaimed a segment with empty pages (of `page_kind`) in it
-            return segment;
+            return Some(segment);
         }
         // 2. otherwise allocate a fresh segment
-        */
+
         Segment::alloc(0, page_kind, page_shift, 0, data)
     }
 
@@ -707,8 +811,7 @@ impl Segment {
         mut page_alignment: usize,
         data: &mut SegmentThreadData,
     ) -> Option<Whole<Page>> {
-        // FIXME: Remove `page_alignment > WORD_SIZE`
-        let page = if unlikely(page_alignment > ALIGNMENT_MAX || page_alignment > WORD_SIZE) {
+        let page = if unlikely(page_alignment > WORD_SIZE) {
             debug_assert!(page_alignment.is_power_of_two());
             Segment::alloc_huge_page(block_size, page_alignment, data)
         } else if block_size <= SMALL_OBJ_SIZE_MAX {
@@ -871,7 +974,8 @@ impl Segment {
 
         segment.thread_id.store(0, Ordering::Relaxed);
 
-        data.current_count -= 1;
+        // FIXME: Is this segment always local?
+        data.remove_segment();
 
         //  Segment::map_freed_at(segment);
 
@@ -951,6 +1055,8 @@ impl Segment {
         segment.thread_id.store(0, Ordering::Release);
         debug_assert!(segment.used == segment.abandoned);
 
+        add_abandoned(segment);
+
         /*
         if ((*segment).memid.memkind != MEM_ARENA) {
           // not in an arena; count it as abandoned and return
@@ -1025,3 +1131,47 @@ impl Segment {
         }
     }
 }
+
+/// A global list of abandoned segments.
+static ABANDONED_SEGMENTS: Mutex<Vec<Whole<Segment>, System>> = Mutex::new(Vec::new_in(System));
+
+unsafe fn add_abandoned(segment: Whole<Segment>) {
+    let mut guard = match ABANDONED_SEGMENTS.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.push(segment);
+}
+
+unsafe fn walk_abandoned(f: impl FnMut(&Whole<Segment>) -> bool) {
+    let mut guard = match ABANDONED_SEGMENTS.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.retain(f);
+}
+
+/*
+/// A global list of abandoned segments.
+static ABANDONED_SEGMENTS: AtomicPtr<Segment> = AtomicPtr::new(null_mut());
+
+unsafe fn add_abandoned(segment: Whole<Segment>) {
+    let mut current = ABANDONED_SEGMENTS.load(Ordering::Relaxed);
+    loop {
+        segment.node.next.set(Ptr::new(current));
+        if compare_exchange_weak_acq_rel(&ABANDONED_SEGMENTS, &mut current, segment.as_ptr()) {
+            break;
+        }
+    }
+}
+
+unsafe fn take_abandoned(segment: Whole<Segment>) {
+    let mut list = ABANDONED_SEGMENTS.load(Ordering::Relaxed);
+    loop {
+        if compare_exchange_weak_acq_rel(&ABANDONED_SEGMENTS, &mut current, null_mut()) {
+            break;
+        }
+    }
+
+}
+*/

@@ -2,10 +2,10 @@ use crate::heap::Heap;
 use crate::linked_list::{List, Node};
 use crate::segment::{Segment, SegmentThreadData, Whole, WholeOrStatic, OPTION_PURGE_DELAY};
 use crate::{
-    bin_index, compare_exchange_weak_acq_rel, compare_exchange_weak_release, index_array, rem,
-    system, thread_id, word_count, yield_now, Ptr, BINS, BIN_FULL, BIN_FULL_BLOCK_SIZE,
-    BIN_HUGE_BLOCK_SIZE, LARGE_OBJ_SIZE_MAX, MAX_EXTEND_SIZE, MIN_EXTEND, SMALL_OBJ_SIZE_MAX,
-    WORD_SIZE,
+    align_down, bin_index, compare_exchange_weak_acq_rel, compare_exchange_weak_release,
+    index_array, rem, system, thread_id, word_count, yield_now, Ptr, BINS, BIN_FULL,
+    BIN_FULL_BLOCK_SIZE, BIN_HUGE_BLOCK_SIZE, LARGE_OBJ_SIZE_MAX, MAX_EXTEND_SIZE, MIN_EXTEND,
+    SMALL_OBJ_SIZE_MAX, WORD_SIZE,
 };
 use bitflags::bitflags;
 use core::intrinsics::likely;
@@ -152,30 +152,30 @@ impl PageQueue {
         } else if (*queue).is_full() {
             debug_assert!((*page).flags().contains(PageFlags::IN_FULL));
         } else {
-            debug_assert!((page.block_size()) == (*queue).block_size);
+            debug_assert!((page.block_size()) == queue.block_size);
         }
 
         (*page).set_flags(PageFlags::IN_FULL, (*queue).is_full());
 
-        (*queue).list.push_front(page, Page::node);
+        queue.list.push_front(page, Page::node);
 
         // update direct
         Heap::queue_first_update(heap, queue);
 
-        (*heap).page_count.set((*heap).page_count.get() + 1);
+        heap.page_count.set(heap.page_count.get() + 1);
     }
 
     unsafe fn remove(queue: Ptr<PageQueue>, page: Whole<Page>) {
         let heap = (*page).heap().unwrap_unchecked();
-        let update = Some(page) == (*queue).list.first.get();
+        let update = Some(page) == queue.list.first.get();
 
-        (*queue).list.remove(page, Page::node);
+        queue.list.remove(page, Page::node);
 
         if update {
             Heap::queue_first_update(heap, queue);
         }
 
-        (*heap).page_count.set((*heap).page_count.get() - 1);
+        heap.page_count.set(heap.page_count.get() - 1);
 
         (*page).remove_flags(PageFlags::IN_FULL);
     }
@@ -187,9 +187,9 @@ impl PageQueue {
         #[allow(clippy::nonminimal_bool)]
         {
             debug_assert!(
-                (page.block_size() == (*to).block_size && page.block_size() == (*from).block_size)
-                    || (page.block_size() == (*to).block_size && (*from).is_full())
-                    || (page.block_size() == (*from).block_size && (*to).is_full())
+                (page.block_size() == to.block_size && page.block_size() == from.block_size)
+                    || (page.block_size() == to.block_size && (*from).is_full())
+                    || (page.block_size() == from.block_size && (*to).is_full())
                     || (page.block_size() > LARGE_OBJ_SIZE_MAX && (*to).is_huge())
                     || (page.block_size() > LARGE_OBJ_SIZE_MAX && (*to).is_full())
             );
@@ -197,22 +197,22 @@ impl PageQueue {
 
         let heap = (*page).heap().unwrap_unchecked();
 
-        let update = Some(page) == (*from).list.first.get();
+        let update = Some(page) == from.list.first.get();
 
-        (*from).list.remove(page, Page::node);
+        from.list.remove(page, Page::node);
 
         if update {
             //  mi_assert_internal(mi_heap_contains_queue(heap, from));
             Heap::queue_first_update(heap, from);
         }
 
-        if let Some(last) = (*to).list.last.get() {
+        if let Some(last) = to.list.last.get() {
             debug_assert!(Some(heap) == last.heap());
         }
 
-        let update = (*to).list.last.get().is_none();
+        let update = to.list.last.get().is_none();
 
-        (*to).list.push_back(page, Page::node);
+        to.list.push_back(page, Page::node);
 
         if update {
             Heap::queue_first_update(heap, to);
@@ -229,7 +229,7 @@ impl PageQueue {
         };
         debug_assert!(bin <= BIN_FULL);
         let queue = Heap::page_queue(heap, bin);
-        debug_assert!(bin >= BINS || page.block_size() == (*queue).block_size);
+        debug_assert!(bin >= BINS || page.block_size() == queue.block_size);
         //  mi_assert_expensive(mi_page_queue_contains(pq, page));
         queue
     }
@@ -245,7 +245,7 @@ impl PageQueue {
         heap: Ptr<Heap>,
         first_try: bool,
     ) -> Option<Whole<Page>> {
-        let mut current = (*queue).list.first.get();
+        let mut current = queue.list.first.get();
         while let Some(page) = current {
             let next = page.node.next.get();
 
@@ -542,7 +542,7 @@ impl Page {
     }
 
     #[inline]
-    fn set_heap(&self, heap: Option<Ptr<Heap>>) {
+    pub fn set_heap(&self, heap: Option<Ptr<Heap>>) {
         debug_assert!(self.thread_free_flag() != DelayedMode::DelayedFreeing);
         self.heap
             .store(Ptr::as_maybe_null_ptr(heap), Ordering::Release)
@@ -554,15 +554,29 @@ impl Page {
         segment: Whole<Segment>,
         ptr: Whole<AllocatedBlock>,
     ) -> Whole<FreeBlock> {
-        let diff = ptr
-            .as_ptr()
-            .byte_offset_from(Page::start(page, segment).0.as_ptr());
-        // FIXME: Is Page::actual_block_size always > 0?
+        debug_assert!(segment.page_kind <= PageKind::Large);
+        // This relies on the fact that allocation happens on multiplies of block size
+        // from the page start.
+        let page_start = Page::start(page, segment).0.as_ptr();
+
+        // Use the `xblock_size` field directly as we know that
+        // has the real block value for non-huge pages.
+        let block_size = page.block_size();
+
+        let relative_to_page_start = ptr.as_ptr().byte_offset_from(page_start);
         let adjust = rem(
-            diff as usize,
-            NonZeroUsize::new_unchecked(Page::actual_block_size(page)),
+            relative_to_page_start as usize,
+            NonZeroUsize::new_unchecked(block_size),
         );
-        ptr.map_addr(|addr| addr - adjust).cast()
+        let result = ptr.map_addr(|addr| addr - adjust).cast::<FreeBlock>();
+
+        debug_assert!(
+            result.as_ptr().cast()
+                == page_start
+                    .wrapping_add(((relative_to_page_start as usize) / block_size) * block_size)
+        );
+
+        result
     }
 
     // Get the block size of a page (special case for huge objects)
@@ -579,6 +593,14 @@ impl Page {
     #[inline]
     pub unsafe fn immediately_available(&self) -> bool {
         !self.free_blocks.is_empty()
+    }
+
+    // are there any available blocks?
+    #[inline]
+    pub unsafe fn any_available(&self) -> bool {
+        debug_assert!(self.reserved.get() > 0);
+        self.used.get() < self.reserved.get() as u32
+            || !DelayedFree::block(self.remote_free_blocks.load(Ordering::Relaxed)).is_null()
     }
 
     #[inline]
@@ -607,7 +629,7 @@ impl Page {
         let queue = PageQueue::from_page(page);
         if likely(page.xblock_size.get() as usize <= MAX_RETIRE_SIZE && !(*queue).is_special()) {
             // not too large && not full or huge queue?
-            if (*queue).list.only_entry(page) {
+            if queue.list.only_entry(page) {
                 // the only page in the queue?
                 page.retire_expire
                     .set(if page.xblock_size.get() as usize <= SMALL_OBJ_SIZE_MAX {
@@ -616,14 +638,14 @@ impl Page {
                         RETIRE_CYCLES / 4
                     });
                 let heap = (*page).heap().unwrap_unchecked();
-                debug_assert!(queue.as_ptr().cast_const() >= (*heap).page_queues.as_ptr());
-                let index = queue.as_ptr().offset_from((*heap).page_queues.as_ptr()) as usize;
+                debug_assert!(queue.as_ptr().cast_const() >= heap.page_queues.as_ptr());
+                let index = queue.as_ptr().offset_from(heap.page_queues.as_ptr()) as usize;
                 debug_assert!(index < BINS);
-                if (index < (*heap).page_retired_min.get()) {
-                    (*heap).page_retired_min.set(index);
+                if (index < heap.page_retired_min.get()) {
+                    heap.page_retired_min.set(index);
                 }
-                if (index > (*heap).page_retired_max.get()) {
-                    (*heap).page_retired_max.set(index);
+                if (index > heap.page_retired_max.get()) {
+                    heap.page_retired_max.set(index);
                 }
                 debug_assert!(page.all_free());
                 return; // dont't free after all
@@ -930,6 +952,19 @@ impl Page {
         Segment::page_abandon(page, &mut (*heap).thread_data().segment);
     }
 
+    /// called from segments when reclaiming abandoned pages
+    #[inline]
+    pub unsafe fn reclaim(page: Whole<Page>, heap: Ptr<Heap>) {
+        // mi_assert_expensive(mi_page_is_valid_init(page));
+        debug_assert!(page.heap() == Some(heap));
+        debug_assert!(page.thread_free_flag() != DelayedMode::NeverDelayedFree);
+
+        // TODO: push on full queue immediately if it is full?
+        let queue = Heap::page_queue_for_size(heap, Page::actual_block_size(page));
+        PageQueue::add(queue, page, heap);
+        //  mi_assert_expensive(_mi_page_is_valid(page));
+    }
+
     // Move a page from the full list back to a regular list
     #[inline]
     pub unsafe fn to_full(page: Whole<Page>, queue: Ptr<PageQueue>) {
@@ -1019,9 +1054,7 @@ impl Page {
     ) -> Option<Whole<Page>> {
         //  debug_assert!(mi_heap_contains_queue(heap, queue));
         debug_assert!(
-            page_alignment > 0
-                || block_size > LARGE_OBJ_SIZE_MAX
-                || block_size == (*queue).block_size
+            page_alignment > 0 || block_size > LARGE_OBJ_SIZE_MAX || block_size == queue.block_size
         );
 
         let page = Segment::page_alloc(
@@ -1051,9 +1084,9 @@ impl Page {
     // Get a fresh page to use
     unsafe fn fresh(heap: Ptr<Heap>, queue: Ptr<PageQueue>) -> Option<Whole<Page>> {
         // debug_assert!(mi_heap_contains_queue(heap, pq));
-        let page = Page::fresh_alloc(heap, queue, (*queue).block_size, 0)?;
+        let page = Page::fresh_alloc(heap, queue, queue.block_size, 0)?;
 
-        debug_assert!((*queue).block_size == Page::actual_block_size(page));
+        debug_assert!(queue.block_size == Page::actual_block_size(page));
         debug_assert!(queue == Heap::page_queue_for_size(heap, Page::actual_block_size(page)));
         Some(page)
     }
@@ -1076,12 +1109,13 @@ impl Page {
     }
 
     #[inline]
-    pub unsafe fn alloc(
+    pub unsafe fn alloc_small(
         page: WholeOrStatic<Page>,
         layout: Layout,
         heap: Ptr<Heap>,
     ) -> Option<Whole<AllocatedBlock>> {
-        Page::alloc_free(page).or_else(|| Heap::alloc_slow(heap, layout))
+        debug_assert!(layout.align() <= WORD_SIZE);
+        Page::alloc_free(page).or_else(|| Heap::alloc_generic(heap, layout))
     }
 
     // Index a block in a page
