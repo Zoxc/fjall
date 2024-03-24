@@ -20,9 +20,9 @@ mod system_allocator;
 #[cfg(feature = "system-allocator")]
 pub use system_allocator::*;
 
-#[cfg(any(miri, unix))]
+#[cfg(all(miri, windows))]
 mod miri;
-#[cfg(any(miri, unix))]
+#[cfg(all(miri, windows))]
 pub use miri::*;
 
 unsafe fn page_align_conservative(ptr: *mut u8, size: usize) -> (*mut u8, usize) {
@@ -60,8 +60,4 @@ pub unsafe fn purge(ptr: *mut u8, size: usize, _allow_reset: bool) -> bool {
 
 pub fn has_overcommit() -> bool {
     cfg!(target_os = "linux")
-}
-
-fn page_size() -> usize {
-    0x1000
 }

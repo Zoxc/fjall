@@ -1,0 +1,1 @@
+ASAN_OPTIONS=allocator_may_return_null=1 cargo fuzz run $1 -- -rss_limit_mb=8000

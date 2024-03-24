@@ -75,7 +75,7 @@ pub struct Heap {
                     // FIXME: or just brute force it
                     _ => {
                         let block_size = i * PTR_SIZE;
-                        assert!(bin_index(block_size) == i);
+                        internal_assert!(bin_index(block_size) == i);
                         block_size
                     }
                 });
@@ -259,14 +259,14 @@ impl Heap {
         for i in 0..=BIN_FULL {
             let queue = Heap::page_queue(heap, i);
             for page in queue.list.iter(Page::node) {
-                debug_assert!((*page).heap() == Some(heap));
+                (*page).assert_heap(Some(heap));
                 if !visitor(page, queue) {
                     return false;
                 }
                 count += 1;
             }
         }
-        debug_assert!(count == total);
+        internal_assert!(count == total);
         true
     }
 
@@ -276,7 +276,7 @@ impl Heap {
             return;
         }
 
-        debug_assert!(heap.state.get() == HeapState::Active);
+        internal_assert!(heap.state.get() == HeapState::Active);
 
         // collect if not the main / final thread (as in we're immediately going to exit)
         Heap::collect(heap, Collect::Abandon);
@@ -292,7 +292,7 @@ impl Heap {
 
     #[inline]
     unsafe fn collect(heap: Ptr<Heap>, collect: Collect) {
-        debug_assert!(heap.state.get() == HeapState::Active);
+        internal_assert!(heap.state.get() == HeapState::Active);
 
         // if (heap==NULL || !mi_heap_is_initialized(heap)) return;
 
@@ -316,13 +316,13 @@ impl Heap {
                 Page::use_delayed_free(page, DelayedMode::NeverDelayedFree, false);
                 true
             });
-        }
 
-        if cfg!(debug_assertions) {
-            Heap::visit_pages(heap, |page, _| {
-                assert!((*page).thread_free_flag() == DelayedMode::NeverDelayedFree);
-                true
-            });
+            if cfg!(debug_assertions) {
+                Heap::visit_pages(heap, |page, _| {
+                    internal_assert!((*page).thread_free_flag() == DelayedMode::NeverDelayedFree);
+                    true
+                });
+            }
         }
 
         // free all current thread delayed blocks.
@@ -347,7 +347,7 @@ impl Heap {
             true // don't break
         });
 
-        debug_assert!(
+        internal_assert!(
             collect != Collect::Abandon
                 || heap.thread_delayed_free.load(Ordering::Acquire).is_null()
         );
@@ -444,7 +444,7 @@ impl Heap {
         }
 
         // set size range to the right page
-        debug_assert!(start <= idx);
+        internal_assert!(start <= idx);
         for sz in start..=idx {
             *pages_free.add(sz) = page.or_static();
         }
@@ -455,12 +455,12 @@ impl Heap {
         let index = bin_index(size);
         let queue = Heap::page_queue(heap, index);
         if size > LARGE_OBJ_SIZE_MAX {
-            debug_assert!(BIN_HUGE == index);
-            debug_assert!(queue.block_size == BIN_HUGE_BLOCK_SIZE);
+            internal_assert!(BIN_HUGE == index);
+            internal_assert!(queue.block_size == BIN_HUGE_BLOCK_SIZE);
         } else {
-            debug_assert!(queue.block_size <= LARGE_OBJ_SIZE_MAX);
+            internal_assert!(queue.block_size <= LARGE_OBJ_SIZE_MAX);
+            internal_assert!(size <= queue.block_size);
         }
-        debug_assert!(size <= queue.block_size);
         queue
     }
 
@@ -544,25 +544,25 @@ impl Heap {
     // Huge pages are also used if the requested alignment is very large (> MI_ALIGNMENT_MAX).
     unsafe fn alloc_huge(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<Page>> {
         let block_size = layout.size(); //_mi_os_good_alloc_size(size);
-        debug_assert!(bin_index(block_size) == BIN_HUGE || layout.align() > WORD_SIZE);
+        internal_assert!(bin_index(block_size) == BIN_HUGE || layout.align() > WORD_SIZE);
 
         let pq = Heap::page_queue(heap, BIN_HUGE); // not block_size as that can be low if the page_alignment > 0
-        debug_assert!((*pq).is_huge());
+        internal_assert!((*pq).is_huge());
 
         let page = Page::fresh_alloc(heap, pq, block_size, layout.align());
         if let Some(page) = page {
             let bsize = Page::actual_block_size(page); // note: not `mi_page_usable_block_size` as `size` includes padding already
-            debug_assert!(bsize >= layout.size());
-            debug_assert!(page.immediately_available());
-            debug_assert!(Page::segment(page).page_kind == PageKind::Huge);
-            debug_assert!(Page::segment(page).used.get() == 1);
+            internal_assert!(bsize >= layout.size());
+            internal_assert!(page.immediately_available());
+            internal_assert!(Page::segment(page).page_kind == PageKind::Huge);
+            internal_assert!(Page::segment(page).used.get() == 1);
         }
         page
     }
 
     #[inline]
     pub unsafe fn alloc_small(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<AllocatedBlock>> {
-        debug_assert!(layout.align() <= WORD_SIZE);
+        internal_assert!(layout.align() <= WORD_SIZE);
         let page = (*heap.pages_free.get())[word_count(layout.size())];
         Page::alloc_small(page, layout, heap)
     }
@@ -613,7 +613,7 @@ impl Heap {
         heap: Ptr<Heap>,
         layout: Layout,
     ) -> Option<Whole<AllocatedBlock>> {
-        debug_assert!(Self::adjust_alignment(layout));
+        internal_assert!(Self::adjust_alignment(layout));
 
         // FIXME: Port some alignment fast paths from `mi_heap_malloc_zero_aligned_at_fallback`
         // and `mi_heap_malloc_zero_aligned_at`.
@@ -628,15 +628,15 @@ impl Heap {
 
         if cfg!(debug_assertions) {
             let segment = Segment::from_pointer(result);
-            debug_assert!(segment.page_kind <= PageKind::Large);
+            internal_assert!(segment.page_kind <= PageKind::Large);
             let page = Segment::page_from_pointer(segment, result);
             let (page_start, page_size) =
                 Segment::page_start(segment, page, page.block_size(), &mut 0);
             let page_end = page_start.as_ptr().wrapping_add(page_size);
 
             // Ensure the aligned result is within the page
-            debug_assert!(page_start.as_ptr() <= aligned.as_ptr().cast());
-            debug_assert!(page_end >= aligned.as_ptr().wrapping_byte_add(layout.size()).cast());
+            internal_assert!(page_start.as_ptr() <= aligned.as_ptr().cast());
+            internal_assert!(page_end >= aligned.as_ptr().wrapping_byte_add(layout.size()).cast());
         }
 
         if result != aligned {
@@ -649,7 +649,7 @@ impl Heap {
     }
 
     pub unsafe fn alloc_generic(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<AllocatedBlock>> {
-        debug_assert!(!Self::adjust_alignment(layout));
+        internal_assert!(!Self::adjust_alignment(layout));
 
         if unlikely(heap.state.get() != HeapState::Active) {
             match heap.state.get() {
@@ -681,8 +681,8 @@ impl Heap {
         }
         let page = page.unwrap_unchecked();
 
-        debug_assert!(page.immediately_available());
-        debug_assert!(Page::actual_block_size(page) >= layout.size());
+        internal_assert!(page.immediately_available());
+        internal_assert!(Page::actual_block_size(page) >= layout.size());
 
         Page::alloc_free(page.or_static())
     }
@@ -695,11 +695,11 @@ fn bin_indices() {
 
     for i in 0..queues.len() {
         if i < queues.len() - 2 {
-            assert!(queues[i].block_size <= LARGE_OBJ_SIZE_MAX);
+            internal_assert!(queues[i].block_size <= LARGE_OBJ_SIZE_MAX);
         }
 
         if i > 0 {
-            assert!(queues[i].block_size >= queues[i - 1].block_size);
+            internal_assert!(queues[i].block_size >= queues[i - 1].block_size);
         }
     }
 
@@ -707,10 +707,10 @@ fn bin_indices() {
         let index = bin_index(size);
         let block_size = queues[index].block_size;
 
-        assert!(size <= queues[index].block_size);
+        internal_assert!(size <= queues[index].block_size);
 
         // We must be above the size of the lower bin
-        assert!(index <= 1 || size > queues[index - 1].block_size);
+        internal_assert!(index <= 1 || size > queues[index - 1].block_size);
     }
 }
 

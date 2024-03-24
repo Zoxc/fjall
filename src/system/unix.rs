@@ -1,15 +1,55 @@
-use crate::Ptr;
+use crate::heap::Heap;
+use crate::with_heap;
 #[cfg(not(feature = "system-allocator"))]
-use crate::{align_down, align_up, system::page_size};
+use crate::{align_down, align_up, wrapped_align_up, Ptr};
 use core::mem;
+use libc::c_void;
 #[cfg(not(feature = "system-allocator"))]
 use libc::{
-    c_void, MADV_DONTNEED, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE,
+    MADV_DONTNEED, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE,
 };
-#[cfg(not(feature = "system-allocator"))]
 use sptr::Strict;
+#[cfg(not(feature = "system-allocator"))]
 use std::alloc::Layout;
 use std::ptr::null_mut;
+use std::sync::LazyLock;
+#[cfg(not(feature = "system-allocator"))]
+use {core::sync::atomic::AtomicUsize, core::sync::atomic::Ordering};
+
+unsafe extern "C" fn thread_done(value: *mut c_void) {
+    if !value.is_null() {
+        with_heap(|heap| Heap::done(heap));
+    }
+}
+
+static KEY: LazyLock<libc::pthread_key_t> = LazyLock::new(|| unsafe {
+    let mut key: libc::pthread_key_t = 0;
+    internal_assert_or_abort!(libc::pthread_key_create(&mut key, Some(thread_done)) == 0);
+    key
+});
+
+pub fn register_thread() {
+    unsafe {
+        internal_assert_or_abort!(
+            libc::pthread_setspecific(*KEY, null_mut::<c_void>().with_addr(1)) == 0
+        );
+    }
+}
+
+#[cfg(not(feature = "system-allocator"))]
+pub fn page_size() -> usize {
+    static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
+
+    let cached = PAGE_SIZE.load(Ordering::Relaxed);
+    if cached != 0 {
+        cached as usize
+    } else {
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        internal_assert_or_abort!(page_size >= 1);
+        PAGE_SIZE.store(page_size as usize, Ordering::Relaxed);
+        page_size as usize
+    }
+}
 
 /// A clock in milliseconds.
 pub fn clock_now() -> Option<u64> {
@@ -29,7 +69,7 @@ pub struct SystemAllocation {
 #[cfg(not(feature = "system-allocator"))]
 pub unsafe fn commit(ptr: Ptr<u8>, size: usize) -> bool {
     let result = libc::mprotect(ptr.as_ptr().cast(), size, PROT_READ | PROT_WRITE);
-    debug_assert!(result == 0);
+    internal_assert!(result == 0);
     result == 0
 }
 
@@ -37,7 +77,7 @@ pub unsafe fn commit(ptr: Ptr<u8>, size: usize) -> bool {
 pub unsafe fn decommit(ptr: Ptr<u8>, size: usize) -> bool {
     // decommit: use MADV_DONTNEED as it decreases rss immediately (unlike MADV_FREE)
     let result = libc::madvise(ptr.as_ptr().cast(), size, MADV_DONTNEED);
-    debug_assert!(result == 0);
+    internal_assert!(result == 0);
     result == 0
 }
 
@@ -57,24 +97,32 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
         }
         let alloc = SystemAllocation { base: result };
         let result: *mut u8 = result.cast();
-        let page_size = page_size();
+
         let aligned = result.map_addr(|addr| align_up(addr, layout.align()));
 
-        let before = align_down(aligned.addr() - result.addr(), page_size);
-        if before > 0 && !cfg!(miri) {
-            libc::munmap(result.with_addr(result.addr() + before).cast(), before);
+        if result.is_null() || aligned.addr().checked_add(layout.size()).is_none() {
+            // Either 0 or the last byte of the address space was allocated, so we can't use
+            // this memory.
+            dealloc(alloc, Ptr::new_unchecked(aligned), layout);
+            return None;
         }
 
-        let after = align_up(aligned.addr() + layout.size(), page_size);
-        let len = align_down(
-            result.addr().wrapping_add(size).wrapping_sub(after),
-            page_size,
+        let unmap = |start: usize, end: usize| {
+            let len = end.wrapping_sub(start);
+            if len > 0 && !cfg!(miri) {
+                libc::munmap(result.with_addr(start).cast(), len);
+            }
+        };
+
+        let page_size = page_size();
+        internal_assert!(result.addr() == align_down(result.addr(), page_size));
+        unmap(result.addr(), align_down(aligned.addr(), page_size));
+        unmap(
+            align_up(aligned.addr().wrapping_add(layout.size()), page_size),
+            wrapped_align_up(result.addr().wrapping_add(size), page_size),
         );
-        if len > 0 && !cfg!(miri) {
-            libc::munmap(result.with_addr(after).cast(), len);
-        }
 
-        debug_assert!(aligned.is_aligned_to(layout.align()));
+        internal_assert!(aligned.is_aligned_to(layout.align()));
         Some((alloc, Ptr::new_unchecked(aligned), commit))
     }
 }
@@ -83,5 +131,5 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
 pub unsafe fn dealloc(alloc: SystemAllocation, __ptr: Ptr<u8>, layout: Layout) {
     let size = layout.size() + layout.align() - 1;
     let result = libc::munmap(alloc.base, size);
-    debug_assert!(result == 0);
+    internal_assert!(result == 0);
 }

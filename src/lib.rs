@@ -2,7 +2,8 @@
     core_intrinsics,
     const_refs_to_static,
     pointer_is_aligned,
-    allocator_api
+    allocator_api,
+    lazy_cell
 )]
 #![allow(
     unstable_name_collisions,
@@ -16,19 +17,78 @@ use crate::heap::Heap;
 use crate::page::{LARGE_PAGE_SIZE, MEDIUM_PAGE_SIZE, SMALL_PAGE_SIZE};
 use crate::segment::Whole;
 use core::cell::UnsafeCell;
+use core::fmt;
 use core::{
     alloc::{GlobalAlloc, Layout},
     mem,
 };
+use page::AllocatedBlock;
+#[cfg(debug_assertions)]
+use segment::cookie;
 use sptr::Strict;
+use std::cell::Cell;
+#[cfg(debug_assertions)]
+use std::cmp::max;
 use std::fmt::Debug;
 use std::hint::unreachable_unchecked;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
+use std::panic::Location;
 use std::ptr::{null_mut, NonNull};
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::thread_local;
+
+#[allow(unused)]
+macro_rules! internal_abort {
+    () => (
+        abort!("explicit abort");
+    );
+    ($($arg:tt)+) => ({
+        crate::abort_fmt(format_args!($($arg)+));
+    });
+}
+
+#[allow(unused)]
+macro_rules! internal_assert_or_abort {
+    ($cond:expr) => ({
+        if !$cond {
+            internal_abort!("assertion failed: {}", stringify!($cond));
+        }
+    });
+    ($cond:expr, $($arg:tt)+) => ({
+        if !$cond {
+            internal_abort!("assertion failed: {}\nmessage:{}", stringify!($cond), format_args!($($arg)+));
+        }
+    });
+}
+
+macro_rules! expensive_assert {
+    ($($arg:tt)*) => {
+        internal_assert!($($arg)*)
+    }
+}
+
+#[cfg(debug_assertions)]
+macro_rules! internal_assert {
+    ($($arg:tt)*) => {
+        internal_assert_or_abort!($($arg)*)
+    }
+}
+
+#[cfg(not(debug_assertions))]
+macro_rules! internal_assert {
+    ($cond:expr) => {{
+        if false {
+            let _: bool = $cond;
+        }
+    }};
+    ($cond:expr, $($arg:tt)+) => {{
+        if false {
+            let _: bool = $cond;
+        }
+    }};
+}
 
 pub mod c;
 mod heap;
@@ -77,6 +137,16 @@ const LARGE_OBJ_WSIZE_MAX: usize = LARGE_OBJ_SIZE_MAX / WORD_SIZE;
 
 const SMALL_WSIZE_MAX: usize = 128;
 const SMALL_SIZE_MAX: usize = SMALL_WSIZE_MAX * WORD_SIZE;
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+#[allow(unused)]
+fn abort_fmt(msg: fmt::Arguments<'_>) -> ! {
+    let location = Location::caller();
+    eprintln!("\nallocator aborted at {location}:\n{msg}");
+    std::process::abort()
+}
 
 /// A raw pointer which is non null. It implements `Deref` for convenience.
 /// `A` may specify additional invariants.
@@ -165,26 +235,40 @@ const fn div(lhs: usize, rhs: NonZeroUsize) -> usize {
 }
 
 #[inline(always)]
-const fn align_down(val: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
+fn align_down(val: usize, align: usize) -> usize {
+    internal_assert!(align.is_power_of_two());
     val & !(align - 1)
 }
 
 #[inline(always)]
-const fn align_up(val: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
+fn align_up(val: usize, align: usize) -> usize {
+    internal_assert!(align.is_power_of_two());
     (val + align - 1) & !(align - 1)
+}
+
+#[allow(unused)]
+#[inline(always)]
+fn wrapped_align_up(val: usize, align: usize) -> usize {
+    internal_assert!(align.is_power_of_two());
+    (val.wrapping_add(align - 1)) & !(align - 1)
+}
+
+#[inline(always)]
+#[cfg(debug_assertions)]
+fn checked_align_up(val: usize, align: usize) -> Option<usize> {
+    internal_assert!(align.is_power_of_two());
+    Some((val.checked_add(align - 1)?) & !(align - 1))
 }
 
 /// Returns the number of words in `size` rounded up.
 #[inline(always)]
-const fn word_count(size: usize) -> usize {
+fn word_count(size: usize) -> usize {
     align_up(size, WORD_SIZE) / WORD_SIZE
 }
 
 #[inline(always)]
 unsafe fn index_array<T, const S: usize>(array: *const [T; S], index: usize) -> *const T {
-    debug_assert!(index < S);
+    internal_assert!(index < S);
     unsafe { array.cast::<T>().add(index) }
 }
 
@@ -224,16 +308,27 @@ thread_local! {
     static LOCAL_HEAP: UnsafeCell<Heap> = const {
         UnsafeCell::new(Heap::initial())
     };
+    static IN_HEAP: Cell<bool> = const { Cell::new(false) };
 }
 
 fn with_heap<R>(f: impl FnOnce(Ptr<Heap>) -> R) -> R {
-    LOCAL_HEAP.with(|heap| f(unsafe { Ptr::new_unchecked(heap.get()) }))
+    if cfg!(debug_assertions) {
+        // FIXME: std's stack overflow signal handler can invoke the allocator
+        // which means that stack overflows in the allocator itself will trigger this.
+        internal_assert!(!IN_HEAP.get());
+        IN_HEAP.set(true);
+    }
+    let result = LOCAL_HEAP.with(|heap| f(unsafe { Ptr::new_unchecked(heap.get()) }));
+    if cfg!(debug_assertions) {
+        IN_HEAP.set(false);
+    }
+    result
 }
 
 /// A thread id which may be reused when the thread exits.
 #[inline]
 fn thread_id() -> usize {
-    with_heap(|heap| heap.addr())
+    LOCAL_HEAP.with(|heap| heap.get().addr())
 }
 
 /*
@@ -293,26 +388,130 @@ fn abort_on_panic<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
+const PADDING: usize = 0;
+// FIXME
+//const PADDING: usize = WORD_SIZE;
+
+#[inline]
+#[cfg(debug_assertions)]
+unsafe fn alloc_padded_end(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<AllocatedBlock>> {
+    use std::ptr;
+
+    let result = Heap::alloc(
+        heap,
+        Layout::from_size_align_unchecked(layout.size().checked_add(PADDING)?, layout.align()),
+    );
+    result.inspect(|&allocation| {
+        let size = Heap::usable_size(allocation);
+        let ptr: *mut u8 = allocation.as_ptr().cast();
+        let cookie = cookie(allocation);
+
+        if PADDING > mem::size_of::<usize>() {
+            ptr::copy_nonoverlapping(
+                cookie.to_ne_bytes().as_ptr(),
+                ptr.add(size - PADDING),
+                mem::size_of::<usize>(),
+            );
+        }
+    })
+}
+
+#[inline]
+#[cfg(not(debug_assertions))]
+unsafe fn alloc_padded_end(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<AllocatedBlock>> {
+    Heap::alloc(heap, layout)
+}
+
+#[inline]
+#[cfg(debug_assertions)]
+unsafe fn free_padded_end(allocation: Whole<AllocatedBlock>) {
+    let size = Heap::usable_size(allocation);
+    let ptr: *mut u8 = allocation.as_ptr().cast();
+    let cookie = cookie(allocation);
+
+    if PADDING > mem::size_of::<usize>() {
+        internal_assert!(usize::from_ne_bytes(*ptr.add(size - PADDING).cast()) == cookie);
+    }
+    Heap::free(allocation)
+}
+
+#[inline]
+#[cfg(not(debug_assertions))]
+unsafe fn free_padded_end(ptr: Whole<AllocatedBlock>) {
+    Heap::free(ptr)
+}
+
+#[inline]
+#[cfg(debug_assertions)]
+unsafe fn alloc_padded(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<AllocatedBlock>> {
+    let padding = max(PADDING, layout.align());
+    let size = checked_align_up(layout.size(), padding)?.checked_add(padding.checked_mul(2)?)?;
+
+    let result = Heap::alloc(
+        heap,
+        Layout::from_size_align_unchecked(size, layout.align()),
+    );
+    result.map(|allocation| {
+        let ptr: *mut usize = allocation.as_ptr().cast();
+        let cookie = cookie(allocation);
+        if PADDING > mem::size_of::<usize>() {
+            *ptr = cookie;
+            let size = Heap::usable_size(allocation);
+            *ptr.byte_add(size - PADDING) = cookie;
+        }
+
+        // Offset the allocation past padding
+        Ptr::new_unchecked(allocation.as_ptr().byte_add(padding))
+    })
+}
+
+#[inline]
+#[cfg(not(debug_assertions))]
+unsafe fn alloc_padded(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<AllocatedBlock>> {
+    Heap::alloc(heap, layout)
+}
+
+#[inline]
+#[cfg(debug_assertions)]
+unsafe fn free_padded(ptr: Whole<AllocatedBlock>, layout: Layout) {
+    let padding = max(PADDING, layout.align());
+    let allocation = Ptr::new_unchecked(ptr.as_ptr().byte_sub(padding));
+    let size = Heap::usable_size(allocation);
+    let ptr: *mut usize = allocation.as_ptr().cast();
+    let cookie = cookie(allocation);
+    if PADDING > mem::size_of::<usize>() {
+        internal_assert!(*ptr == cookie);
+        internal_assert!(*ptr.byte_add(size - PADDING) == cookie);
+    }
+    Heap::free(allocation)
+}
+
+#[inline]
+#[cfg(not(debug_assertions))]
+unsafe fn free_padded(ptr: Whole<AllocatedBlock>, _layout: Layout) {
+    Heap::free(ptr)
+}
+
 #[inline]
 pub unsafe fn alloc(layout: Layout) -> *mut u8 {
-    debug_assert!(layout.size() > 0);
-    debug_assert!(layout.align() > 0);
-    debug_assert!(layout.align().is_power_of_two());
+    internal_assert!(layout.size() > 0);
+    internal_assert!(layout.align() > 0);
+    internal_assert!(layout.align().is_power_of_two());
 
-    let result = with_heap(|heap| Whole::as_maybe_null_ptr(Heap::alloc(heap, layout)));
+    let result = with_heap(|heap| Whole::as_maybe_null_ptr(alloc_padded(heap, layout)));
     // `result` may be null due to oom or if the heap
     // is abandoned and later TLS destructors allocate.
-    debug_assert!(result.is_aligned_to(layout.align()));
+    internal_assert!(result.is_aligned_to(layout.align()));
     result.cast()
 }
 
 #[inline]
 pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
-    debug_assert!(!ptr.is_null());
-    debug_assert!(ptr.is_aligned_to(layout.align()));
-    debug_assert!(layout.size() > 0);
+    internal_assert!(!ptr.is_null());
+    internal_assert!(ptr.is_aligned_to(layout.align()));
+    internal_assert!(layout.size() > 0);
 
-    Heap::free(Whole::new_unchecked(ptr.cast()))
+    free_padded(Whole::new_unchecked(ptr.cast()), layout)
 }
 
 unsafe impl GlobalAlloc for Alloc {

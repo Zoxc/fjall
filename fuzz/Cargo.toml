@@ -1,0 +1,65 @@
+[package]
+name = "fjall-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+sptr = "0.3.2"
+libfuzzer-sys = { version = "0.4.0", features = ["arbitrary-derive"] }
+
+[dependencies.fjall]
+path = ".."
+features = ["system-allocator"]
+
+[[bin]]
+name = "fuzz_c_api"
+path = "fuzz_targets/c_api.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_rust_api"
+path = "fuzz_targets/rust_api.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_rust_api_small"
+path = "fuzz_targets/rust_api_small.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_rust_api_medium"
+path = "fuzz_targets/rust_api_medium.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_range_overlap"
+path = "fuzz_targets/range_overlap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_threads"
+path = "fuzz_targets/threads.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_reclaim"
+path = "fuzz_targets/reclaim.rs"
+test = false
+doc = false
+bench = false

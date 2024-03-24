@@ -139,7 +139,7 @@ pub struct Segment {
 
 #[cfg(debug_assertions)]
 #[allow(overflowing_literals)]
-fn cookie(ptr: Whole<Segment>) -> usize {
+pub fn cookie<T, A>(ptr: Ptr<T, A>) -> usize {
     ptr.as_ptr().addr() ^ 0xa0f7b251664141e9
 }
 
@@ -160,12 +160,12 @@ impl Segment {
         ptr: Whole<AllocatedBlock>,
     ) -> usize {
         let diff = ptr.as_ptr().byte_offset_from(segment.as_ptr());
-        debug_assert!(
+        internal_assert!(
             diff >= 0 && (diff as usize) <= SEGMENT_SIZE /* for huge alignment it can be equal */
         );
         let idx = (diff as usize) >> segment.page_shift;
-        debug_assert!(idx < segment.capacity);
-        debug_assert!(segment.page_kind <= PageKind::Medium || idx == 0);
+        internal_assert!(idx < segment.capacity);
+        internal_assert!(segment.page_kind <= PageKind::Medium || idx == 0);
         idx
     }
 
@@ -189,12 +189,12 @@ impl Segment {
 
     #[inline]
     pub unsafe fn from_pointer_checked(ptr: Whole<AllocatedBlock>) -> Whole<Segment> {
-        debug_assert!(ptr.as_ptr().addr() & !(WORD_SIZE - 1) != 0);
+        internal_assert!(ptr.as_ptr().addr() & !(WORD_SIZE - 1) != 0);
 
         let segment = Segment::from_pointer(ptr);
 
         #[cfg(debug_assertions)]
-        debug_assert_eq!((*segment.as_ptr()).cookie, cookie(segment));
+        assert_eq!((*segment.as_ptr()).cookie, cookie(segment));
 
         segment
     }
@@ -227,7 +227,7 @@ impl Segment {
             .add(page.segment_idx as usize * page_size);
 
         if page.segment_idx == 0 {
-            debug_assert!(page_size >= segment.segment_info_size);
+            internal_assert!(page_size >= segment.segment_info_size);
             // the first page starts after the segment info (and possible guard page)
             p = p.add(segment.segment_info_size);
             page_size -= segment.segment_info_size;
@@ -247,7 +247,7 @@ impl Segment {
         *pre_size = 0;
         if let Some(non_zero_block_size) = NonZeroUsize::new(block_size) {
             if page.segment_idx == 0 && segment.page_kind <= PageKind::Medium {
-                debug_assert!(non_zero_block_size.get() <= LARGE_OBJ_SIZE_MAX);
+                internal_assert!(non_zero_block_size.get() <= LARGE_OBJ_SIZE_MAX);
 
                 // for small and medium objects, ensure the page start is aligned with the block size (PR#66 by kickunderscore)
                 let adjust = block_size - rem(p.addr(), non_zero_block_size);
@@ -275,7 +275,7 @@ impl Segment {
             return true;
         }
 
-        debug_assert!(segment.allow_decommit);
+        internal_assert!(segment.allow_decommit);
         // mi_assert_expensive(!mi_pages_purge_contains(page, tld));
 
         let (start, psize) = Segment::raw_page_start(segment, page);
@@ -299,8 +299,8 @@ impl Segment {
         page: Whole<Page>,
         data: &mut SegmentThreadData,
     ) -> bool {
-        debug_assert!(Page::segment(page) == segment);
-        debug_assert!(!page.segment_in_use.get());
+        internal_assert!(Page::segment(page) == segment);
+        internal_assert!(!page.segment_in_use.get());
 
         Page::purge_remove(page, data);
 
@@ -312,13 +312,13 @@ impl Segment {
         // set in-use before doing unreset to prevent delayed reset
         page.segment_in_use.set(true);
         segment.used.set(segment.used.get() + 1);
-        debug_assert!(
-            page.segment_in_use.get() && page.is_committed.get() && page.used.get() == 0 /* && !mi_pages_purge_contains(page, tld) */
-        );
-        debug_assert!(segment.used.get() <= segment.capacity);
+        expensive_assert!(!data.pages_purge.contains(page, Page::node));
+        internal_assert!(page.used.get() == 0);
+        internal_assert!(page.is_committed.get());
+        internal_assert!(segment.used.get() <= segment.capacity);
         if segment.used.get() == segment.capacity && segment.page_kind <= PageKind::Medium {
             // if no more free pages, remove from the queue
-            debug_assert!(!segment.has_free());
+            internal_assert!(!segment.has_free());
             Segment::remove_from_free_queue(segment, data);
         }
         true
@@ -343,7 +343,7 @@ impl Segment {
 
     // Possibly clear pages and check if free space is available
     unsafe fn check_free(segment: Whole<Segment>, block_size: usize) -> (bool, bool) {
-        debug_assert!(block_size <= LARGE_OBJ_SIZE_MAX);
+        internal_assert!(block_size <= LARGE_OBJ_SIZE_MAX);
         let mut has_page = false;
         let mut pages_used = 0;
         let mut pages_used_empty = 0;
@@ -367,7 +367,7 @@ impl Segment {
                 has_page = true;
             }
         }
-        debug_assert!(pages_used == segment.used.get() && pages_used >= pages_used_empty);
+        internal_assert!(pages_used == segment.used.get() && pages_used >= pages_used_empty);
         (has_page, ((pages_used - pages_used_empty) == 0))
     }
 
@@ -383,7 +383,7 @@ impl Segment {
         *right_page_reclaimed = false;
 
         // can be 0 still with abandoned_next, or already a thread id for segments outside an arena that are reclaimed on a free.
-        debug_assert!(
+        internal_assert!(
             segment.thread_id.load(Ordering::Relaxed) == 0
                 || segment.thread_id.load(Ordering::Relaxed) == thread_id()
         );
@@ -392,17 +392,17 @@ impl Segment {
         segment.was_reclaimed.set(true);
         data.reclaim_count += 1;
         data.add_segment();
-        debug_assert!(!segment.node.used());
+        internal_assert!(!segment.node.used());
         //mi_assert_expensive(mi_segment_is_valid(segment, tld));
         //_mi_stat_decrease(&tld.stats.segments_abandoned, 1);
 
         for i in 0..segment.capacity {
             let page = Segment::page(segment, i);
             if page.segment_in_use.get() {
-                debug_assert!(page.is_committed.get());
-                debug_assert!(!page.node.used());
-                debug_assert!(page.thread_free_flag() == DelayedMode::NeverDelayedFree);
-                debug_assert!(page.heap().is_none());
+                internal_assert!(page.is_committed.get());
+                internal_assert!(!page.node.used());
+                internal_assert!(page.thread_free_flag() == DelayedMode::NeverDelayedFree);
+                page.assert_heap(None);
                 segment.abandoned.set(segment.abandoned.get() - 1);
                 //_mi_stat_decrease(&tld.stats.pages_abandoned, 1);
                 // set the heap again and allow heap thread delayed free again.
@@ -416,6 +416,8 @@ impl Segment {
                     // otherwise reclaim it into the heap
                     Page::reclaim(page, heap);
                     if requested_block_size == page.block_size() && page.any_available() {
+                        // We can avoid `actual_page_size` here as large and
+                        // huge pages won't have any available.
                         *right_page_reclaimed = true;
                     }
                 }
@@ -427,9 +429,9 @@ impl Segment {
             }
             */
         }
-        debug_assert!(segment.abandoned.get() == 0);
+        internal_assert!(segment.abandoned.get() == 0);
         if segment.used.get() == 0 {
-            debug_assert!(!(*right_page_reclaimed));
+            internal_assert!(!(*right_page_reclaimed));
             Segment::free(segment, data);
             None
         } else {
@@ -503,7 +505,7 @@ impl Segment {
             .unwrap()
             .pad_to_align();
 
-        assert!(metadata.align() <= SEGMENT_ALIGN);
+        internal_assert!(metadata.align() <= SEGMENT_ALIGN);
 
         // Pad to the requested page alignment.
         let layout = metadata.align_to(page_alignment).ok()?.pad_to_align();
@@ -511,7 +513,7 @@ impl Segment {
         *metadata_size = layout.size();
 
         let size = if required == 0 {
-            debug_assert!(layout.size() <= SEGMENT_SIZE);
+            internal_assert!(layout.size() <= SEGMENT_SIZE);
             SEGMENT_SIZE
         } else {
             layout.size().checked_add(required)?
@@ -530,8 +532,10 @@ impl Segment {
         page_alignment: usize,
         data: &mut SegmentThreadData,
     ) -> Option<Whole<Segment>> {
+        // FIXME
+        internal_assert!(page_alignment <= SEGMENT_ALIGN);
         // required is only > 0 for huge page allocations
-        debug_assert!(
+        internal_assert!(
             (required > 0 && page_kind > PageKind::Large)
                 || (required == 0 && page_kind <= PageKind::Large)
         );
@@ -539,19 +543,19 @@ impl Segment {
         // calculate needed sizes first
         let capacity;
         if page_kind == PageKind::Huge {
-            debug_assert!(page_shift == SEGMENT_SHIFT + 1 && required > 0);
+            internal_assert!(page_shift == SEGMENT_SHIFT + 1 && required > 0);
             capacity = 1;
         } else {
-            debug_assert!(required == 0 && page_alignment == 0);
+            internal_assert!(required == 0 && page_alignment == 0);
             let page_size = 1 << page_shift;
             capacity = SEGMENT_SIZE / page_size;
-            debug_assert!(SEGMENT_SIZE % page_size == 0);
-            debug_assert!((1..=SMALL_PAGES_PER_SEGMENT).contains(&capacity));
+            internal_assert!(SEGMENT_SIZE % page_size == 0);
+            internal_assert!((1..=SMALL_PAGES_PER_SEGMENT).contains(&capacity));
         }
         let mut metadata_size = 0;
         let layout =
             Segment::calculate_sizes(capacity, required, &mut metadata_size, page_alignment)?;
-        debug_assert!(layout.size() - metadata_size >= required);
+        internal_assert!(layout.size() - metadata_size >= required);
 
         let commit = OPTION_EAGER_COMMIT ||
         page_kind > PageKind::Medium // don't delay for large objects
@@ -563,11 +567,15 @@ impl Segment {
        || data.count >= OPTION_EAGER_DELAY_COUNT;
 
         let (system_alloc, allocation, initially_committed) = system::alloc(layout, commit)?;
+        internal_assert!(allocation.as_ptr().is_aligned_to(layout.align()));
+        internal_assert!(allocation.as_ptr().is_aligned_to(SEGMENT_SIZE));
 
-        debug_assert!(allocation.as_ptr().is_aligned_to(layout.align()));
-        debug_assert!(allocation.as_ptr().is_aligned_to(SEGMENT_SIZE));
-
-        let segment: Whole<Segment> = Whole::new_unchecked(allocation.as_ptr().cast());
+        // We cannot use the last byte in the address space.
+        internal_assert!(allocation
+            .as_ptr()
+            .addr()
+            .checked_add(layout.size())
+            .is_some());
 
         if !initially_committed && (!system::commit(allocation, metadata_size)) {
             // commit failed; we cannot touch the memory: free the segment directly and return `null_mut()`
@@ -578,10 +586,10 @@ impl Segment {
         data.add_segment();
 
         ptr::write(
-            segment.as_ptr(),
+            allocation.as_ptr().cast(),
             Segment {
                 allow_decommit: !initially_committed,
-                allow_purge: segment.allow_decommit && (OPTION_PURGE_DELAY >= 0),
+                allow_purge: !initially_committed && (OPTION_PURGE_DELAY >= 0),
                 system_alloc,
                 segment_size: layout.size(),
                 was_reclaimed: Cell::new(false),
@@ -591,7 +599,7 @@ impl Segment {
                 capacity,
                 segment_info_size: metadata_size,
                 #[cfg(debug_assertions)]
-                cookie: cookie(segment),
+                cookie: cookie(allocation),
                 node: Node::UNUSED,
                 thread_id: AtomicUsize::new(thread_id()),
                 page_shift,
@@ -599,9 +607,11 @@ impl Segment {
             },
         );
 
+        let segment: Whole<Segment> = Whole::new_unchecked(allocation.as_ptr().cast());
+
         // initialize pages info
         for i in 0..capacity {
-            debug_assert!(i <= 255);
+            internal_assert!(i <= 255);
             let page = Segment::page(segment, i);
             (*page.as_ptr()).segment_idx = i as u8;
             page.is_committed.set(initially_committed);
@@ -625,17 +635,17 @@ impl Segment {
         page_shift: usize,
         data: &mut SegmentThreadData,
     ) -> Option<Whole<Segment>> {
-        debug_assert!(page_kind <= PageKind::Large);
-        debug_assert!(block_size <= LARGE_OBJ_SIZE_MAX);
+        internal_assert!(page_kind <= PageKind::Large);
+        internal_assert!(block_size <= LARGE_OBJ_SIZE_MAX);
 
         // 1. try to reclaim an abandoned segment
         let mut reclaimed = false;
         let segment = Segment::try_reclaim(heap, block_size, page_kind, &mut reclaimed, data);
-        // debug_assert!(segment.is_null() || _mi_arena_memid_is_suitable(segment->memid, heap->arena_id));
+        // internal_assert!(segment.is_null() || _mi_arena_memid_is_suitable(segment->memid, heap->arena_id));
         if reclaimed {
             // reclaimed the right page right into the heap
             // FIXME
-            /*     debug_assert!(
+            /*     internal_assert!(
                 !segment.is_null()
                     && (*segment).page_kind == page_kind
                     && page_kind <= PageKind::Large
@@ -681,9 +691,9 @@ impl Segment {
             if let Some(segment) =
                 Segment::reclaim_or_alloc(heap, block_size, kind, page_shift, data)
             {
-                debug_assert!(segment.page_kind == kind);
-                debug_assert!(segment.used.get() < segment.capacity);
-                //   debug_assert!(_mi_arena_memid_is_suitable((*segment).memid, heap->arena_id));
+                internal_assert!(segment.page_kind == kind);
+                internal_assert!(segment.used.get() < segment.capacity);
+                //   internal_assert!(_mi_arena_memid_is_suitable((*segment).memid, heap->arena_id));
                 Segment::page_try_alloc_in_queue(heap, free_queue, data)
             // this should now succeed
             } else {
@@ -703,7 +713,7 @@ impl Segment {
             Segment::reclaim_or_alloc(heap, block_size, PageKind::Large, LARGE_PAGE_SHIFT, data)
         {
             let page = Segment::find_free(segment, data);
-            debug_assert!(page.is_some());
+            internal_assert!(page.is_some());
             page
         } else {
             None
@@ -716,10 +726,10 @@ impl Segment {
         page: Whole<Page>,
         _block: Whole<FreeBlock>,
     ) {
-        debug_assert!(segment.page_kind == PageKind::Huge);
-        debug_assert!(segment == Page::segment(page));
-        debug_assert!(page.used.get() == 1); // this is called just before the free
-        debug_assert!(page.free_blocks.is_empty());
+        internal_assert!(segment.page_kind == PageKind::Huge);
+        internal_assert!(segment == Page::segment(page));
+        internal_assert!(page.used.get() == 1); // this is called just before the free
+        internal_assert!(page.free_blocks.is_empty());
 
         // FIXME
         /*
@@ -750,14 +760,14 @@ impl Segment {
         let page = Segment::find_free(segment, data).unwrap_unchecked();
 
         let (start, psize) = Segment::page_start(segment, page, 0, &mut 0);
-        debug_assert!(psize >= size);
-        debug_assert!(start.as_ptr().is_aligned_to(page_alignment));
+        internal_assert!(psize >= size);
+        internal_assert!(start.as_ptr().is_aligned_to(page_alignment));
 
         /*
         // reset the part of the page that will not be used; this can be quite large (close toSEGMENT_SIZE)
         if (page_alignment > 0 && (*segment).allow_decommit && (*page).is_committed.get()) {
             let aligned_p = start.map_addr(|addr| align_up(addr, page_alignment));
-            debug_assert!(psize - (aligned_p.offset_from(start) >= size));
+            internal_assert!(psize - (aligned_p.offset_from(start) >= size));
             let decommit_start = start + mem::size_of::<Block>(); // for the free list
             let decommit_size = aligned_p - decommit_start;
             // FIXME
@@ -774,7 +784,7 @@ impl Segment {
         data: &mut SegmentThreadData,
     ) -> Option<Whole<Page>> {
         let page = if unlikely(page_alignment > WORD_SIZE) {
-            debug_assert!(page_alignment.is_power_of_two());
+            internal_assert!(page_alignment.is_power_of_two());
             Segment::alloc_huge_page(block_size, page_alignment, data)
         } else if block_size <= SMALL_OBJ_SIZE_MAX {
             Segment::alloc_page_of_kind(
@@ -804,9 +814,9 @@ impl Segment {
 
         if let Some(page) = page {
             //  mi_assert_expensive( mi_segment_is_valid(_mi_page_segment(page),tld));
-            debug_assert!(Page::segment(page).raw_page_size() >= block_size);
+            internal_assert!(Page::segment(page).raw_page_size() >= block_size);
             // mi_segment_try_purge(tld);
-            //  debug_assert!( mi_page_not_in_queue(page, tld));
+            //  internal_assert!( mi_page_not_in_queue(page, tld));
         }
         page
     }
@@ -828,15 +838,15 @@ impl Segment {
     }
 
     pub unsafe fn page_abandon(page: Whole<Page>, data: &mut SegmentThreadData) {
-        debug_assert!((*page).thread_free_flag() == DelayedMode::NeverDelayedFree);
-        debug_assert!((*page).heap().is_none());
+        internal_assert!((*page).thread_free_flag() == DelayedMode::NeverDelayedFree);
+        page.assert_heap(None);
 
         let segment = Page::segment(page);
         //   mi_assert_expensive(!mi_pages_purge_contains(page, tld));
         //   mi_assert_expensive(mi_segment_is_valid(segment, tld));
         segment.abandoned.set(segment.abandoned.get() + 1);
         //    _mi_stat_increase(&tld->stats->pages_abandoned, 1);
-        debug_assert!(segment.abandoned.get() <= segment.used.get());
+        internal_assert!(segment.abandoned.get() <= segment.used.get());
         if segment.used.get() == segment.abandoned.get() {
             // all pages are abandoned, abandon the entire segment
             Segment::abandon(segment, data);
@@ -926,7 +936,7 @@ impl Segment {
                 fully_committed = false;
             }
         }
-        debug_assert!(
+        internal_assert!(
             (fully_committed && committed_size == segment_size)
                 || (!fully_committed && committed_size < segment_size)
         );
@@ -983,7 +993,7 @@ impl Segment {
     // clears the thread_id.
     unsafe fn mark_abandoned(segment: Whole<Segment>) {
         segment.thread_id.store(0, Ordering::Release);
-        debug_assert!(segment.used == segment.abandoned);
+        internal_assert!(segment.used == segment.abandoned);
 
         add_abandoned(segment);
     }
@@ -993,8 +1003,8 @@ impl Segment {
     ----------------------------------------------------------- */
 
     unsafe fn abandon(segment: Whole<Segment>, data: &mut SegmentThreadData) {
-        debug_assert!(segment.used.get() == segment.abandoned.get());
-        debug_assert!(segment.used.get() > 0);
+        internal_assert!(segment.used.get() == segment.abandoned.get());
+        internal_assert!(segment.used.get() > 0);
 
         // Potentially force purge. Only abandoned segments in arena memory can be
         // reclaimed without a free so if a segment is not from an arena we force purge here to be conservative.
@@ -1021,7 +1031,7 @@ impl Segment {
     unsafe fn insert_in_free_queue(segment: Whole<Segment>, data: &mut SegmentThreadData) {
         let queue = SegmentThreadData::free_queue_of_kind(data, segment.page_kind);
         // FIXME, is this true? There doesn't seem to be a clear invariant here.
-        debug_assert!(queue.is_some());
+        internal_assert!(queue.is_some());
         queue.unwrap_unchecked().push_back(segment, Segment::node);
     }
 
@@ -1044,6 +1054,7 @@ impl Segment {
     }
 }
 
+// FIXME: Add a bool to indicate emptyness
 /// A global list of abandoned segments.
 static ABANDONED_SEGMENTS: Mutex<List<Whole<Segment>>> = Mutex::new(List::empty());
 

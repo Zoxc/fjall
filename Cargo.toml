@@ -1,4 +1,9 @@
-workspace = { members = ["codegen_test", "direct_test", "global_alloc_test"] }
+workspace = { members = [
+    "codegen_test",
+    "direct_test",
+    "global_alloc_test",
+    "fuzz",
+] }
 
 [package]
 name = "fjall"
@@ -16,8 +21,9 @@ version = "0.52"
 features = [
     "Win32_System_Memory",
     "Win32_Foundation",
-    "Win32_System_SystemServices", # FOR DLL_THREAD_DETACH
+    "Win32_System_SystemServices",    # FOR DLL_THREAD_DETACH
     "Win32_System_Performance",
+    "Win32_System_SystemInformation",
 ]
 
 [features]

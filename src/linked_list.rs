@@ -60,6 +60,14 @@ impl<T: Copy + PartialEq> List<T> {
         self.first.get() == Some(element) && self.last.get() == Some(element)
     }
 
+    /// Checks if `element` is in this list.
+    pub unsafe fn contains(&self, element: T, node: impl Fn(T) -> *mut Node<T>) -> bool
+    where
+        T: PartialEq,
+    {
+        self.iter(node).any(|e| e == element)
+    }
+
     /// Checks if `element` is in some list or this list.
     pub unsafe fn may_contain(&self, element: T, node: impl Fn(T) -> *mut Node<T>) -> bool {
         (*node(element)).next.get().is_some()
@@ -93,7 +101,7 @@ impl<T: Copy + PartialEq> List<T> {
             (*node(first)).prev.set(Some(element));
             self.first.set(Some(element));
         } else {
-            debug_assert!(self.last.get().is_none());
+            internal_assert!(self.last.get().is_none());
             self.first.set(Some(element));
             self.last.set(Some(element));
         }
@@ -104,7 +112,7 @@ impl<T: Copy + PartialEq> List<T> {
         element_node.next.set(None);
         element_node.prev.set(self.last.get());
         if let Some(last) = self.last.get() {
-            debug_assert!((*node(last)).next.get().is_none());
+            internal_assert!((*node(last)).next.get().is_none());
             (*node(last)).next.set(Some(element));
             self.last.set(Some(element));
         } else {
