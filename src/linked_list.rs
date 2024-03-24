@@ -1,4 +1,3 @@
-use core::ptr::null_mut;
 use std::cell::Cell;
 
 #[derive(Clone, Debug)]
@@ -14,7 +13,7 @@ impl<T: Copy> Node<T> {
     };
 
     pub unsafe fn used(&self) -> bool {
-        self.prev.get().is_none() && self.next.get().is_none()
+        self.prev.get().is_some() || self.next.get().is_some()
     }
 }
 
@@ -34,10 +33,12 @@ impl<T: Copy> Clone for List<T> {
 }
 
 impl<T: Copy + PartialEq> List<T> {
-    pub const EMPTY: List<T> = List {
-        first: Cell::new(None),
-        last: Cell::new(None),
-    };
+    pub const fn empty() -> Self {
+        List {
+            first: Cell::new(None),
+            last: Cell::new(None),
+        }
+    }
 
     #[inline]
     pub unsafe fn iter<N: Fn(T) -> *mut Node<T>>(&self, node: N) -> Iter<true, T, N> {

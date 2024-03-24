@@ -2,15 +2,15 @@ use crate::page::{AllocatedBlock, DelayedMode, FreeBlock, Page, PageFlags, PageK
 use crate::segment::{Segment, SegmentThreadData, Whole, WholeOrStatic};
 use crate::{
     align_up, bin_index, compare_exchange_weak_acq_rel, compare_exchange_weak_release, index_array,
-    is_main_thread, system, word_count, yield_now, Ptr, BINS, BIN_FULL, BIN_FULL_BLOCK_SIZE,
-    BIN_HUGE, BIN_HUGE_BLOCK_SIZE, LARGE_OBJ_SIZE_MAX, LARGE_OBJ_WSIZE_MAX, MEDIUM_ALIGN_MAX,
-    MEDIUM_ALIGN_MAX_SIZE, SMALL_ALLOC, SMALL_ALLOC_WORDS, SMALL_SIZE_MAX, WORD_SIZE,
+    system, word_count, yield_now, Ptr, BIN_FULL, BIN_FULL_BLOCK_SIZE, BIN_HUGE,
+    BIN_HUGE_BLOCK_SIZE, LARGE_OBJ_SIZE_MAX, MEDIUM_ALIGN_MAX, MEDIUM_ALIGN_MAX_SIZE, SMALL_ALLOC,
+    SMALL_ALLOC_WORDS, SMALL_SIZE_MAX, WORD_SIZE,
 };
 use core::{alloc::Layout, intrinsics::unlikely, ptr::null_mut};
+use sptr::Strict;
 use std::cell::{Cell, UnsafeCell};
 use std::intrinsics::likely;
-use std::ptr::{addr_of, addr_of_mut};
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 // Thread local data
 
@@ -24,10 +24,12 @@ pub struct ThreadData {
 }
 
 impl ThreadData {
-    const INITIAL: ThreadData = ThreadData {
-        //  heartbeat: 0,
-        segment: SegmentThreadData::INITIAL,
-    };
+    const fn initial() -> ThreadData {
+        ThreadData {
+            //  heartbeat: 0,
+            segment: SegmentThreadData::initial(),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -57,23 +59,6 @@ pub struct Heap {
     pub page_retired_max: Cell<usize>, // largest retired index into the `pages` array.
     pub page_count: Cell<usize>,       // total number of pages in the `page_queues` queues.
     no_reclaim: Cell<bool>,            // `true` if this heap should not reclaim abandoned pages
-
-                                       /*
-                                         mi_tld_t*             tld;
-                                         mi_page_t*            pages_free_direct[MI_PAGES_DIRECT];  // optimize: array where every entry points a page with possibly free blocks in the corresponding queue for that size.
-                                         mi_page_queue_t       pages[MI_BIN_FULL + 1];              // queue of pages for each size class (or "bin")
-                                         _Atomic(mi_block_t*)  thread_delayed_free;
-                                         mi_threadid_t         thread_id;                           // thread this heap belongs too
-                                         mi_arena_id_t         arena_id;                            // arena id if the heap belongs to a specific arena (or 0)
-                                         uintptr_t             cookie;                              // random cookie to verify pointers (see `_mi_ptr_cookie`)
-                                         uintptr_t             keys[2];                             // two random keys used to encode the `thread_delayed_free` list
-                                         mi_random_ctx_t       random;                              // random number context used for secure allocation
-                                         size_t                page_count;                          // total number of pages in the `pages` queues.
-                                         size_t                page_retired_min;                    // smallest retired index (retired pages are fully free, but still in the page queues)
-                                         size_t                page_retired_max;                    // largest retired index into the `pages` array.
-                                         mi_heap_t*            next;                                // list of heaps per thread
-                                         bool                  no_reclaim;                          // `true` if this heap should not reclaim abandoned pages
-                                       */
 }
 
 /*
@@ -87,6 +72,7 @@ pub struct Heap {
 
                     0 => 1,
                     // FIXME: Find the right function here
+                    // FIXME: or just brute force it
                     _ => {
                         let block_size = i * PTR_SIZE;
                         assert!(bin_index(block_size) == i);
@@ -103,114 +89,116 @@ const fn queue(size: usize) -> PageQueue {
     PageQueue::new(size * WORD_SIZE)
 }
 
-const PAGE_QUEUES_INITIAL: [PageQueue; BIN_FULL + 1] = [
-    queue(1),
-    queue(1),
-    queue(2),
-    queue(3),
-    queue(4),
-    queue(5),
-    queue(6),
-    queue(7),
-    queue(8), /* 8 */
-    queue(10),
-    queue(12),
-    queue(14),
-    queue(16),
-    queue(20),
-    queue(24),
-    queue(28),
-    queue(32), /* 16 */
-    queue(40),
-    queue(48),
-    queue(56),
-    queue(64),
-    queue(80),
-    queue(96),
-    queue(112),
-    queue(128), /* 24 */
-    queue(160),
-    queue(192),
-    queue(224),
-    queue(256),
-    queue(320),
-    queue(384),
-    queue(448),
-    queue(512), /* 32 */
-    queue(640),
-    queue(768),
-    queue(896),
-    queue(1024),
-    queue(1280),
-    queue(1536),
-    queue(1792),
-    queue(2048), /* 40 */
-    queue(2560),
-    queue(3072),
-    queue(3584),
-    queue(4096),
-    queue(5120),
-    queue(6144),
-    queue(7168),
-    queue(8192), /* 48 */
-    queue(10240),
-    queue(12288),
-    queue(14336),
-    queue(16384),
-    queue(20480),
-    queue(24576),
-    queue(28672),
-    queue(32768), /* 56 */
-    queue(40960),
-    queue(49152),
-    queue(57344),
-    queue(65536), // 1 MB block size
-    /*
-    queue(81920),
-    queue(98304),
-    queue(114688),
-    queue(131072), // 2 MB block size  64
-    */
-    /*
-        // 16 byte word size (65 bins)
-        queue(163840),
-        queue(196608),
-        queue(229376),
-        queue(262144), // 8 byte word size (69 bins)
-     */
-    /*
-        // Is this for smaller word sizes?
-        queue(327680),
-        queue(393216),
-         queue(458752),
-         queue(524288), /* 72 */
-    */
-    queue(BIN_HUGE_BLOCK_SIZE / WORD_SIZE), /* 655360, Huge queue */
-    queue(BIN_FULL_BLOCK_SIZE / WORD_SIZE), /* Full queue */
-];
+const fn page_queues_initial() -> [PageQueue; BIN_FULL + 1] {
+    [
+        queue(1),
+        queue(1),
+        queue(2),
+        queue(3),
+        queue(4),
+        queue(5),
+        queue(6),
+        queue(7),
+        queue(8), /* 8 */
+        queue(10),
+        queue(12),
+        queue(14),
+        queue(16),
+        queue(20),
+        queue(24),
+        queue(28),
+        queue(32), /* 16 */
+        queue(40),
+        queue(48),
+        queue(56),
+        queue(64),
+        queue(80),
+        queue(96),
+        queue(112),
+        queue(128), /* 24 */
+        queue(160),
+        queue(192),
+        queue(224),
+        queue(256),
+        queue(320),
+        queue(384),
+        queue(448),
+        queue(512), /* 32 */
+        queue(640),
+        queue(768),
+        queue(896),
+        queue(1024),
+        queue(1280),
+        queue(1536),
+        queue(1792),
+        queue(2048), /* 40 */
+        queue(2560),
+        queue(3072),
+        queue(3584),
+        queue(4096),
+        queue(5120),
+        queue(6144),
+        queue(7168),
+        queue(8192), /* 48 */
+        queue(10240),
+        queue(12288),
+        queue(14336),
+        queue(16384),
+        queue(20480),
+        queue(24576),
+        queue(28672),
+        queue(32768), /* 56 */
+        queue(40960),
+        queue(49152),
+        queue(57344),
+        queue(65536), // 1 MB block size
+        /*
+        queue(81920),
+        queue(98304),
+        queue(114688),
+        queue(131072), // 2 MB block size  64
+        */
+        /*
+            // 16 byte word size (65 bins)
+            queue(163840),
+            queue(196608),
+            queue(229376),
+            queue(262144), // 8 byte word size (69 bins)
+         */
+        /*
+            // Is this for smaller word sizes?
+            queue(327680),
+            queue(393216),
+             queue(458752),
+             queue(524288), /* 72 */
+        */
+        queue(BIN_HUGE_BLOCK_SIZE / WORD_SIZE), /* 655360, Huge queue */
+        queue(BIN_FULL_BLOCK_SIZE / WORD_SIZE), /* Full queue */
+    ]
+}
 
 #[derive(PartialEq, PartialOrd)]
 enum Collect {
-    Normal,
     Force,
     Abandon,
 }
 
 impl Heap {
-    #[allow(clippy::declare_interior_mutable_const)]
-    pub const INITIAL: Heap = Heap {
-        state: Cell::new(HeapState::Uninit),
-        pages_free: UnsafeCell::new(
-            [unsafe { WholeOrStatic::new_unchecked(Page::EMPTY_PTR) }; SMALL_ALLOC_WORDS + 1],
-        ),
-        page_queues: PAGE_QUEUES_INITIAL,
-        page_retired_min: Cell::new(0),
-        page_retired_max: Cell::new(0),
-        page_count: Cell::new(0),
-        thread_data: UnsafeCell::new(ThreadData::INITIAL),
-        thread_delayed_free: AtomicPtr::new(null_mut()),
-        no_reclaim: Cell::new(false),
-    };
+    pub const fn initial() -> Self {
+        Heap {
+            state: Cell::new(HeapState::Uninit),
+            pages_free: UnsafeCell::new(
+                [unsafe { WholeOrStatic::new_unchecked(Page::EMPTY_PTR) }; SMALL_ALLOC_WORDS + 1],
+            ),
+            page_queues: page_queues_initial(),
+            page_retired_min: Cell::new(0),
+            page_retired_max: Cell::new(0),
+            page_count: Cell::new(0),
+            thread_data: UnsafeCell::new(ThreadData::initial()),
+            thread_delayed_free: AtomicPtr::new(null_mut()),
+            no_reclaim: Cell::new(false),
+        }
+    }
 
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn thread_data(&self) -> &mut ThreadData {
@@ -218,7 +206,7 @@ impl Heap {
     }
 
     unsafe fn delayed_free_all(heap: Ptr<Heap>) {
-        while (!Heap::delayed_free_partial(heap)) {
+        while !Heap::delayed_free_partial(heap) {
             yield_now();
         }
     }
@@ -234,10 +222,10 @@ impl Heap {
         let mut all_freed = true;
 
         // and free them all
-        while (!block.is_null()) {
+        while !block.is_null() {
             let next = (*block).next.get();
             // use internal free instead of regular one to keep stats etc correct
-            if (!Page::free_delayed_block(Whole::new_unchecked(block))) {
+            if !Page::free_delayed_block(Whole::new_unchecked(block)) {
                 // we might already start delayed freeing while another thread has not yet
                 // reset the delayed_freeing flag; in that case delay it further by reinserting the current block
                 // into the delayed free list
@@ -293,7 +281,7 @@ impl Heap {
         // collect if not the main / final thread (as in we're immediately going to exit)
         Heap::collect(heap, Collect::Abandon);
 
-        (*heap.as_ptr()) = Heap::INITIAL;
+        (*heap.as_ptr()) = Heap::initial();
         heap.state.set(HeapState::Abandoned);
     }
 
@@ -348,11 +336,11 @@ impl Heap {
         Heap::visit_pages(heap, |page, queue| {
             //mi_assert_internal(mi_heap_page_is_valid(heap, pq, page, NULL, NULL));
             Page::free_collect(page, collect >= Collect::Force);
-            if (page.all_free()) {
+            if page.all_free() {
                 // no more used blocks, free the page.
                 // note: this will free retired pages as well.
                 Page::free(page, queue, collect >= Collect::Force);
-            } else if (collect == Collect::Abandon) {
+            } else if collect == Collect::Abandon {
                 // still used blocks but the thread is done; abandon the page
                 Page::abandon(page, queue);
             }
@@ -494,7 +482,6 @@ impl Heap {
     #[inline]
     unsafe fn find_page(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<Page>> {
         if unlikely(layout.size() > LARGE_OBJ_SIZE_MAX || layout.align() > WORD_SIZE) {
-            // FIXME: Align huge
             if unlikely(layout.size() > isize::MAX as usize) {
                 None
             } else {
@@ -585,12 +572,24 @@ impl Heap {
         if likely(layout.size() <= SMALL_SIZE_MAX && layout.align() <= WORD_SIZE) {
             Heap::alloc_small(heap, layout)
         } else {
-            // FIXME: Add `mi_heap_malloc_zero_aligned_at_fallback` fallback for alignment
             Heap::alloc_slow(heap, layout)
         }
     }
 
-    pub unsafe fn init(heap: Ptr<Heap>) {
+    #[inline]
+    pub unsafe fn usable_size(block: Whole<AllocatedBlock>) -> usize {
+        let segment = Segment::from_pointer_checked(block);
+        let page = Segment::page_from_pointer(segment, block);
+        let block_size = Page::actual_block_size(page);
+        if likely(!page.flags().contains(PageFlags::HAS_ALIGNED)) {
+            block_size
+        } else {
+            let unaligned = Page::unalign_pointer(page, segment, block).as_ptr();
+            block_size - (block.as_ptr().addr() - unaligned.addr())
+        }
+    }
+
+    pub unsafe fn init(_heap: Ptr<Heap>) {
         // Register a thread exit callback.
         system::register_thread();
     }
@@ -633,6 +632,11 @@ impl Heap {
             let page = Segment::page_from_pointer(segment, result);
             let (page_start, page_size) =
                 Segment::page_start(segment, page, page.block_size(), &mut 0);
+            let page_end = page_start.as_ptr().wrapping_add(page_size);
+
+            // Ensure the aligned result is within the page
+            debug_assert!(page_start.as_ptr() <= aligned.as_ptr().cast());
+            debug_assert!(page_end >= aligned.as_ptr().wrapping_byte_add(layout.size()).cast());
         }
 
         if result != aligned {
@@ -687,7 +691,7 @@ impl Heap {
 #[test]
 #[cfg(not(debug_assertions))]
 fn bin_indices() {
-    let queues = PAGE_QUEUES_INITIAL;
+    let queues = page_queues_initial();
 
     for i in 0..queues.len() {
         if i < queues.len() - 2 {
@@ -712,7 +716,7 @@ fn bin_indices() {
 
 #[test]
 fn bin_special_indices() {
-    let queues = PAGE_QUEUES_INITIAL;
+    let queues = page_queues_initial();
 
     let huge = queues.len() - 2;
     let full = queues.len() - 1;

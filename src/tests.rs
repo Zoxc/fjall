@@ -1,13 +1,16 @@
+#![cfg(test)]
+
 use crate::{
     alloc, MEDIUM_ALIGN_MAX, MEDIUM_ALIGN_MAX_SIZE, MEDIUM_OBJ_SIZE_MAX, SMALL_OBJ_SIZE_MAX,
 };
 use crate::{dealloc, LARGE_OBJ_SIZE_MAX};
 use std::alloc::Layout;
 use std::cmp::{max, min};
-use std::ops::Sub;
+use std::ops::{Shl, Sub};
 
 fn test(size: usize, align: usize) {
-    let layout = Layout::from_size_align(LARGE_OBJ_SIZE_MAX + 1, 1).unwrap();
+    dbg!(size, align);
+    let layout = Layout::from_size_align(size, align).unwrap();
     unsafe {
         let ptr = alloc(layout);
         assert!(!ptr.is_null());
@@ -18,7 +21,7 @@ fn test(size: usize, align: usize) {
 fn test_align(size: usize) {
     test(size, 1);
     test(size, MEDIUM_ALIGN_MAX);
-    test(size, MEDIUM_ALIGN_MAX + 1);
+    test(size, MEDIUM_ALIGN_MAX.shl(1));
 }
 
 fn test_size(size: usize) {

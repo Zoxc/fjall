@@ -1,16 +1,19 @@
+use crate::Ptr;
 use crate::{abort_on_panic, heap::Heap, with_heap};
-use crate::{
-    align_down, align_up,
-    segment::{OPTION_PURGE_DELAY, OPTION_PURGE_DOES_DECOMMIT},
-    system,
-};
-use core::ptr::read_volatile;
-use sptr::Strict;
+use crate::{align_up, system};
+use std::cmp::max;
+
 use std::{
     alloc::Layout,
     sync::atomic::{AtomicI64, Ordering},
-    time::Instant,
 };
+use std::{mem, ptr::null_mut};
+use windows_sys::Win32::System::Memory::{
+    MemExtendedParameterAddressRequirements, VirtualAlloc, VirtualAlloc2, VirtualFree,
+    MEM_ADDRESS_REQUIREMENTS, MEM_COMMIT, MEM_DECOMMIT, MEM_EXTENDED_PARAMETER, MEM_RELEASE,
+    MEM_RESERVE, PAGE_READWRITE,
+};
+use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_DETACH, DLL_THREAD_DETACH};
 
 // Apparently this trick doesn't work for loaded DLLs, that but it works on Window 10 22H2.
@@ -22,6 +25,7 @@ use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_DETACH, DLL_THREAD_
 #[used]
 static THREAD_CALLBACK: unsafe extern "system" fn(*mut (), u32, *mut ()) = callback;
 
+#[cfg(not(miri))]
 pub fn register_thread() {}
 
 unsafe extern "system" fn callback(_h: *mut (), dw_reason: u32, _pv: *mut ()) {
@@ -34,10 +38,6 @@ unsafe extern "system" fn callback(_h: *mut (), dw_reason: u32, _pv: *mut ()) {
 
 /// A clock in milliseconds.
 pub fn clock_now() -> Option<u64> {
-    use std::cmp::max;
-    use windows_sys::Win32::System::Performance::{
-        QueryPerformanceCounter, QueryPerformanceFrequency,
-    };
     let frequency = {
         static FREQUENCY: AtomicI64 = AtomicI64::new(0);
 
@@ -68,35 +68,30 @@ pub fn mul_div_u64(value: u64, numer: u64, denom: u64) -> u64 {
     q * numer + r * numer / denom
 }
 
-use std::{mem, ptr::null_mut};
-use windows_sys::Win32::System::Memory::{
-    VirtualAlloc, MEM_ADDRESS_REQUIREMENTS, MEM_COMMIT, PAGE_READWRITE,
-};
+#[cfg(not(feature = "system-allocator"))]
+#[derive(Clone, Copy, Debug)]
+pub struct SystemAllocation;
 
-pub unsafe fn commit(ptr: *mut u8, size: usize) -> bool {
-    !VirtualAlloc(ptr.cast_const().cast(), size, MEM_COMMIT, PAGE_READWRITE).is_null()
+#[cfg(not(feature = "system-allocator"))]
+pub unsafe fn commit(ptr: Ptr<u8>, size: usize) -> bool {
+    !VirtualAlloc(
+        ptr.as_ptr().cast_const().cast(),
+        size,
+        MEM_COMMIT,
+        PAGE_READWRITE,
+    )
+    .is_null()
 }
 
-pub unsafe fn decommit(ptr: *mut u8, size: usize) -> bool {
-    use std::{mem, ptr::null_mut};
-    use windows_sys::Win32::System::Memory::{
-        VirtualAlloc, VirtualFree, MEM_ADDRESS_REQUIREMENTS, MEM_COMMIT, MEM_DECOMMIT,
-        PAGE_READWRITE,
-    };
-    let result = VirtualFree(ptr.cast(), size, MEM_DECOMMIT);
+#[cfg(not(feature = "system-allocator"))]
+pub unsafe fn decommit(ptr: Ptr<u8>, size: usize) -> bool {
+    let result = VirtualFree(ptr.as_ptr().cast(), size, MEM_DECOMMIT);
     debug_assert_ne!(result, 0);
     result != 0
 }
 
-pub fn alloc(layout: Layout, commit: bool) -> (*mut u8, bool) {
-    use std::{mem, ptr::null_mut};
-    use windows_sys::Win32::System::Memory::{
-        MemExtendedParameterAddressRequirements, VirtualAlloc2, MEM_ADDRESS_REQUIREMENTS,
-        MEM_COMMIT, MEM_EXTENDED_PARAMETER, MEM_RESERVE, PAGE_READWRITE,
-    };
-
-    use crate::align_up;
-
+#[cfg(not(feature = "system-allocator"))]
+pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>, bool)> {
     let mut address_reqs: MEM_ADDRESS_REQUIREMENTS = unsafe { mem::zeroed() };
     address_reqs.Alignment = layout.align();
 
@@ -110,7 +105,7 @@ pub fn alloc(layout: Layout, commit: bool) -> (*mut u8, bool) {
         VirtualAlloc2(
             0,
             null_mut(),
-            align_up(layout.size(), system::page_size()), // FIXME: Round
+            align_up(layout.size(), system::page_size()),
             if commit {
                 MEM_RESERVE | MEM_COMMIT
             } else {
@@ -121,26 +116,13 @@ pub fn alloc(layout: Layout, commit: bool) -> (*mut u8, bool) {
             1,
         )
     };
-    if result.is_null() {
-        return (null_mut(), false);
-    }
-    /*  eprintln!(
-        "VirtualAlloc2 {:x}, size - {:x}",
-        result as usize,
-        layout.size()
-    );*/
-    debug_assert!(result.is_aligned_to(layout.align()));
-    (result.cast(), commit)
+    let result: Ptr<u8> = unsafe { Ptr::new(result.cast())? };
+    debug_assert!(result.as_ptr().is_aligned_to(layout.align()));
+    Some((SystemAllocation, result, commit))
 }
 
-pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
-    use std::io::Error;
-    use windows_sys::Win32::System::Memory::{VirtualFree, MEM_DECOMMIT, MEM_RELEASE};
-    //eprintln!("VirtualFree {:x}, size - {:x}", ptr as usize, layout.size());
-    let result = VirtualFree(ptr.cast(), 0, MEM_RELEASE);
-    if cfg!(debug_assertions) && result == 0 {
-        //   let os_error = Error::last_os_error();
-        //  eprintln!("VirtualFree failed: {os_error:?}  ");
-    }
+#[cfg(not(feature = "system-allocator"))]
+pub unsafe fn dealloc(_alloc: SystemAllocation, ptr: Ptr<u8>, _layout: Layout) {
+    let result = VirtualFree(ptr.as_ptr().cast(), 0, MEM_RELEASE);
     debug_assert_ne!(result, 0);
 }

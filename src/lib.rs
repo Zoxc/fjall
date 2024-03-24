@@ -7,36 +7,30 @@
 #![allow(
     unstable_name_collisions,
     internal_features,
-    unused,
     clippy::missing_safety_doc,
-    clippy::declare_interior_mutable_const,
     clippy::assertions_on_constants,
     clippy::comparison_chain
 )]
 
 use crate::heap::Heap;
-use crate::page::{Page, LARGE_PAGE_SIZE, MEDIUM_PAGE_SIZE, SMALL_PAGE_SIZE};
-use crate::segment::{Whole, SEGMENT_SIZE};
+use crate::page::{LARGE_PAGE_SIZE, MEDIUM_PAGE_SIZE, SMALL_PAGE_SIZE};
+use crate::segment::Whole;
 use core::cell::UnsafeCell;
 use core::{
     alloc::{GlobalAlloc, Layout},
-    intrinsics::likely,
     mem,
 };
-use page::{FreeBlock, PageFlags};
-use segment::Segment;
 use sptr::Strict;
-use std::cmp::{max, min};
 use std::fmt::Debug;
 use std::hint::unreachable_unchecked;
-use std::intrinsics::unlikely;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::ptr::{null_mut, NonNull};
 use std::sync::atomic::{AtomicPtr, Ordering};
-use std::{alloc::System, thread_local};
+use std::thread_local;
 
+pub mod c;
 mod heap;
 mod linked_list;
 mod page;
@@ -69,8 +63,6 @@ const MAX_EXTEND_SIZE: usize = 4 * 1024; // heuristic, one OS page seems to work
 
 const MIN_EXTEND: usize = 1;
 
-const MAX_ALIGN_SIZE: usize = 16;
-
 /// The largest alignment which does not create dedicated huge pages.
 const MEDIUM_ALIGN_MAX: usize = 0x10000;
 /// The largest size for which we expand the size to align rather than create a huge page.
@@ -82,10 +74,6 @@ const SMALL_OBJ_SIZE_MAX: usize = SMALL_PAGE_SIZE / 4; // 16KiB
 const MEDIUM_OBJ_SIZE_MAX: usize = MEDIUM_PAGE_SIZE / 4; // 128KiB
 const LARGE_OBJ_SIZE_MAX: usize = LARGE_PAGE_SIZE / 2; // 2MiB
 const LARGE_OBJ_WSIZE_MAX: usize = LARGE_OBJ_SIZE_MAX / WORD_SIZE;
-
-const MAX_SLICE_SHIFT: usize = 6; // at most 64 slices
-const MAX_SLICES: usize = 1 << MAX_SLICE_SHIFT;
-const MIN_SLICES: usize = 2;
 
 const SMALL_WSIZE_MAX: usize = 128;
 const SMALL_SIZE_MAX: usize = SMALL_WSIZE_MAX * WORD_SIZE;
@@ -169,6 +157,14 @@ const fn rem(lhs: usize, rhs: NonZeroUsize) -> usize {
 }
 
 #[inline(always)]
+const fn div(lhs: usize, rhs: NonZeroUsize) -> usize {
+    match lhs.checked_div(rhs.get()) {
+        Some(r) => r,
+        None => unsafe { unreachable_unchecked() },
+    }
+}
+
+#[inline(always)]
 const fn align_down(val: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
     val & !(align - 1)
@@ -209,7 +205,7 @@ fn bin_index(size: usize) -> usize {
                                      // - adjust with 3 because we use do not round the first 8 sizes
                                      //   which each get an exact bin
 
-        let c = ((w >> ((b - 2) as u32)) & 0x03);
+        let c = (w >> ((b - 2) as u32)) & 0x03;
 
         ((b << 2) + c) - 3
     }
@@ -226,54 +222,31 @@ const fn bit_scan_reverse(x: usize) -> usize {
 
 thread_local! {
     static LOCAL_HEAP: UnsafeCell<Heap> = const {
-        UnsafeCell::new(Heap::INITIAL)
+        UnsafeCell::new(Heap::initial())
     };
 }
-/*
-#[cfg(miri)]
-mod thread_exit {
-    use crate::{heap::Heap, with_heap};
 
-    thread_local! {
-        static THREAD_EXIT: ThreadExit = const { ThreadExit };
-    }
-    struct ThreadExit;
-    impl Drop for ThreadExit {
-        fn drop(&mut self) {
-            unsafe {
-                with_heap(|heap| Heap::done(heap));
-            }
-        }
-    }
-    pub fn register_thread() {
-        THREAD_EXIT.with(|_| {});
-    }
-}
-*/
 fn with_heap<R>(f: impl FnOnce(Ptr<Heap>) -> R) -> R {
     LOCAL_HEAP.with(|heap| f(unsafe { Ptr::new_unchecked(heap.get()) }))
 }
 
+/// A thread id which may be reused when the thread exits.
 #[inline]
 fn thread_id() -> usize {
-    // FIXME: Is this valid with reuse?
     with_heap(|heap| heap.addr())
 }
 
+/*
 fn is_main_thread() -> bool {
     false
 }
+ */
 
 fn yield_now() {
     std::thread::yield_now();
 }
 
 pub struct Alloc;
-
-#[inline]
-fn fallback_alloc(layout: Layout) -> bool {
-    false // layout.align() > WORD_SIZE || layout.size() > LARGE_OBJ_SIZE_MAX
-}
 
 #[inline]
 fn compare_exchange_weak_acq_rel<T>(
@@ -322,15 +295,15 @@ fn abort_on_panic<R>(f: impl FnOnce() -> R) -> R {
 
 #[inline]
 pub unsafe fn alloc(layout: Layout) -> *mut u8 {
-    if likely(!fallback_alloc(layout)) {
-        let result = with_heap(|heap| Whole::as_maybe_null_ptr(Heap::alloc(heap, layout)));
-        // `result` may be null due to oom or if the heap
-        // is abandoned and later TLS destructors allocate.
-        debug_assert!(result.is_aligned_to(layout.align()));
-        result.cast()
-    } else {
-        System.alloc(layout)
-    }
+    debug_assert!(layout.size() > 0);
+    debug_assert!(layout.align() > 0);
+    debug_assert!(layout.align().is_power_of_two());
+
+    let result = with_heap(|heap| Whole::as_maybe_null_ptr(Heap::alloc(heap, layout)));
+    // `result` may be null due to oom or if the heap
+    // is abandoned and later TLS destructors allocate.
+    debug_assert!(result.is_aligned_to(layout.align()));
+    result.cast()
 }
 
 #[inline]
@@ -339,11 +312,7 @@ pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
     debug_assert!(ptr.is_aligned_to(layout.align()));
     debug_assert!(layout.size() > 0);
 
-    if likely(!fallback_alloc(layout)) {
-        Heap::free(Whole::new_unchecked(ptr.cast()))
-    } else {
-        System.dealloc(ptr, layout)
-    }
+    Heap::free(Whole::new_unchecked(ptr.cast()))
 }
 
 unsafe impl GlobalAlloc for Alloc {
