@@ -1,5 +1,4 @@
 use crate::Ptr;
-use crate::{heap::Heap, with_heap};
 use core::alloc::GlobalAlloc;
 use std::alloc::{Layout, System};
 
@@ -25,5 +24,5 @@ pub fn alloc(layout: Layout, _commit: bool) -> Option<(SystemAllocation, Ptr<u8>
 }
 
 pub unsafe fn dealloc(_alloc: SystemAllocation, ptr: Ptr<u8>, layout: Layout) {
-    System.dealloc(ptr.as_mut(), layout);
+    System.dealloc(ptr.as_ptr(), layout);
 }

@@ -8,3 +8,6 @@ edition = "2021"
 [dependencies]
 fjall = { path = ".." }
 rand = "0.8.5"
+
+[features]
+system-allocator = ["fjall/system-allocator"]

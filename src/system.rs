@@ -19,12 +19,12 @@ pub use unix::*;
 mod system_allocator;
 #[cfg(feature = "system-allocator")]
 pub use system_allocator::*;
-
-#[cfg(any(miri, unix))]
+/*
+#[cfg(miri)]
 mod miri;
-#[cfg(any(miri, unix))]
+#[cfg(miri)]
 pub use miri::*;
-
+ */
 unsafe fn page_align_conservative(ptr: *mut u8, size: usize) -> (*mut u8, usize) {
     let page_size = page_size();
     let end = ptr.add(size).map_addr(|addr| align_down(addr, page_size));

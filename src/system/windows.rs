@@ -86,7 +86,7 @@ pub unsafe fn commit(ptr: Ptr<u8>, size: usize) -> bool {
 #[cfg(not(feature = "system-allocator"))]
 pub unsafe fn decommit(ptr: Ptr<u8>, size: usize) -> bool {
     let result = VirtualFree(ptr.as_ptr().cast(), size, MEM_DECOMMIT);
-    debug_assert_ne!(result, 0);
+    assert_ne!(result, 0);
     result != 0
 }
 
@@ -117,12 +117,12 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
         )
     };
     let result: Ptr<u8> = unsafe { Ptr::new(result.cast())? };
-    debug_assert!(result.as_ptr().is_aligned_to(layout.align()));
+    internal_assert!(result.as_ptr().is_aligned_to(layout.align()));
     Some((SystemAllocation, result, commit))
 }
 
 #[cfg(not(feature = "system-allocator"))]
 pub unsafe fn dealloc(_alloc: SystemAllocation, ptr: Ptr<u8>, _layout: Layout) {
     let result = VirtualFree(ptr.as_ptr().cast(), 0, MEM_RELEASE);
-    debug_assert_ne!(result, 0);
+    assert_ne!(result, 0);
 }

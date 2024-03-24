@@ -93,7 +93,7 @@ impl<T: Copy + PartialEq> List<T> {
             (*node(first)).prev.set(Some(element));
             self.first.set(Some(element));
         } else {
-            debug_assert!(self.last.get().is_none());
+            internal_assert!(self.last.get().is_none());
             self.first.set(Some(element));
             self.last.set(Some(element));
         }
@@ -104,7 +104,7 @@ impl<T: Copy + PartialEq> List<T> {
         element_node.next.set(None);
         element_node.prev.set(self.last.get());
         if let Some(last) = self.last.get() {
-            debug_assert!((*node(last)).next.get().is_none());
+            internal_assert!((*node(last)).next.get().is_none());
             (*node(last)).next.set(Some(element));
             self.last.set(Some(element));
         } else {

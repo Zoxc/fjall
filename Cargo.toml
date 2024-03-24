@@ -1,4 +1,9 @@
-workspace = { members = ["codegen_test", "direct_test", "global_alloc_test"] }
+workspace = { members = [
+    "codegen_test",
+    "direct_test",
+    "global_alloc_test",
+    "fuzz",
+] }
 
 [package]
 name = "fjall"

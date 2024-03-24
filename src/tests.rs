@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use crate::segment::SEGMENT_ALIGN;
 use crate::{
     alloc, MEDIUM_ALIGN_MAX, MEDIUM_ALIGN_MAX_SIZE, MEDIUM_OBJ_SIZE_MAX, SMALL_OBJ_SIZE_MAX,
 };
@@ -13,7 +14,7 @@ fn test(size: usize, align: usize) {
     let layout = Layout::from_size_align(size, align).unwrap();
     unsafe {
         let ptr = alloc(layout);
-        assert!(!ptr.is_null());
+        internal_assert!(!ptr.is_null());
         dealloc(ptr, layout);
     }
 }
@@ -21,7 +22,8 @@ fn test(size: usize, align: usize) {
 fn test_align(size: usize) {
     test(size, 1);
     test(size, MEDIUM_ALIGN_MAX);
-    test(size, MEDIUM_ALIGN_MAX.shl(1));
+    test(size, MEDIUM_ALIGN_MAX << 1);
+    test(size, SEGMENT_ALIGN << 1);
 }
 
 fn test_size(size: usize) {
