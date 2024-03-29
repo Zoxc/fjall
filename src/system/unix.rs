@@ -78,7 +78,7 @@ pub unsafe fn decommit(ptr: Ptr<u8>, size: usize) -> bool {
     // decommit: use MADV_DONTNEED as it decreases rss immediately (unlike MADV_FREE)
     let result = libc::madvise(ptr.as_ptr().cast(), size, MADV_DONTNEED);
     internal_assert!(result == 0);
-    result == 0
+    false
 }
 
 #[cfg(not(feature = "system-allocator"))]
