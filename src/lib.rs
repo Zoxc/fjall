@@ -325,7 +325,7 @@ fn with_heap<R>(f: impl FnOnce(Ptr<Heap>) -> R) -> R {
     result
 }
 
-/// A thread id which may be reused when the thread exits.
+/// A thread id which may be reused when the thread exits. This must be non-zero.
 #[inline]
 fn thread_id() -> usize {
     LOCAL_HEAP.with(|heap| heap.get().addr())

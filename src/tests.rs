@@ -7,7 +7,7 @@ use crate::{
 use crate::{dealloc, LARGE_OBJ_SIZE_MAX};
 use std::alloc::Layout;
 use std::cmp::{max, min};
-use std::ops::{Shl, Sub};
+use std::ops::Sub;
 
 fn test(size: usize, align: usize) {
     dbg!(size, align);

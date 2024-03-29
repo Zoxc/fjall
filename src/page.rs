@@ -820,7 +820,7 @@ impl Page {
             // huge pages are special as they occupy the entire segment
             // as these are large we reset the memory occupied by the page so it is available to other threads
             // (as the owning thread needs to actually free the memory later).
-            Segment::huge_page_reset(segment, page, block);
+            Segment::huge_page_reset(segment, page, block); // FIXME: Can we not free immediately?
         }
 
         // Try to put the block on either the page-local thread free list, or the heap delayed free list.
@@ -1032,6 +1032,8 @@ impl Page {
             page_alignment,
             &mut (*heap).thread_data().segment,
         )?;
+
+        internal_assert!((Page::segment(page).page_kind == PageKind::Huge) == (*queue).is_huge());
 
         // a fresh page was found, initialize it
         let full_block_size = if (*queue).is_huge() {
