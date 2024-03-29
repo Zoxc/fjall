@@ -70,12 +70,18 @@ impl<T: Copy + PartialEq> List<T> {
 
     /// Checks if `element` is in some list or this list.
     pub unsafe fn may_contain(&self, element: T, node: impl Fn(T) -> *mut Node<T>) -> bool {
-        (*node(element)).next.get().is_some()
+        let result = (*node(element)).next.get().is_some()
             || (*node(element)).prev.get().is_some()
-            || self.first.get() == Some(element)
+            || self.first.get() == Some(element);
+        if !result {
+            expensive_assert!(!self.contains(element, node));
+        }
+        result
     }
 
     pub unsafe fn remove(&self, element: T, node: impl Fn(T) -> *mut Node<T>) {
+        expensive_assert!(self.contains(element, &node));
+
         let element_node = &mut *node(element);
         if let Some(prev) = element_node.prev.get() {
             (*node(prev)).next.set(element_node.next.get());
@@ -94,6 +100,8 @@ impl<T: Copy + PartialEq> List<T> {
     }
 
     pub unsafe fn push_front(&self, element: T, node: impl Fn(T) -> *mut Node<T>) {
+        expensive_assert!(!self.contains(element, &node));
+
         let element_node = &mut *node(element);
         element_node.next.set(self.first.get());
         element_node.prev.set(None);
@@ -108,6 +116,8 @@ impl<T: Copy + PartialEq> List<T> {
     }
 
     pub unsafe fn push_back(&self, element: T, node: impl Fn(T) -> *mut Node<T>) {
+        expensive_assert!(!self.contains(element, &node));
+
         let element_node = &mut *node(element);
         element_node.next.set(None);
         element_node.prev.set(self.last.get());

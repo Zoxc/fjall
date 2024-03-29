@@ -5,12 +5,14 @@ use crate::page::{
     MEDIUM_PAGE_SHIFT, SMALL_PAGE_SIZE,
 };
 use crate::{
+    align_down, rem, system, thread_id, Ptr, LARGE_OBJ_SIZE_MAX, MEDIUM_OBJ_SIZE_MAX, WORD_SIZE,
+};
+use crate::{
     heap::Heap,
     linked_list::{List, Node},
     page::SMALL_PAGE_SHIFT,
     SMALL_OBJ_SIZE_MAX,
 };
-use crate::{rem, system, thread_id, Ptr, LARGE_OBJ_SIZE_MAX, MEDIUM_OBJ_SIZE_MAX, WORD_SIZE};
 use core::alloc::Layout;
 use sptr::Strict;
 use std::cell::Cell;
@@ -29,7 +31,6 @@ const _: () = {
 
 pub const SEGMENT_SIZE: usize = 1 << SEGMENT_SHIFT;
 pub const SEGMENT_ALIGN: usize = SEGMENT_SIZE;
-pub const SEGMENT_MASK: usize = SEGMENT_ALIGN - 1;
 
 pub const SMALL_PAGES_PER_SEGMENT: usize = SEGMENT_SIZE / SMALL_PAGE_SIZE;
 //pub const MEDIUM_PAGES_PER_SEGMENT: usize = SEGMENT_SIZE / MEDIUM_PAGE_SIZE;
@@ -80,6 +81,7 @@ impl SegmentThreadData {
         data: &mut SegmentThreadData,
         kind: PageKind,
     ) -> Option<&mut List<Whole<Segment>>> {
+        // V
         match kind {
             PageKind::Small => Some(&mut data.small_free),
             PageKind::Medium => Some(&mut data.medium_free),
@@ -132,7 +134,7 @@ pub struct Segment {
     segment_info_size: usize, // space we are using from the first page for segment meta-data and possible guard pages.
 
     #[cfg(debug_assertions)]
-    cookie: usize, // verify addresses in secure mode: `_mi_ptr_cookie(segment) == segment->cookie`
+    pub cookie: usize, // verify addresses in secure mode: `_mi_ptr_cookie(segment) == segment->cookie`
 
     node: Node<Whole<Segment>>,
 }
@@ -149,8 +151,33 @@ impl Segment {
         unsafe { &mut (*segment.as_ptr()).node }
     }
 
+    pub unsafe fn validate(segment: Whole<Segment>, data: &mut SegmentThreadData) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+
+        #[cfg(debug_assertions)]
+        internal_assert!(segment.cookie == cookie(segment));
+
+        internal_assert!(segment.used.get() <= segment.capacity);
+        internal_assert!(segment.abandoned.get() <= segment.used.get());
+        let mut nfree = 0;
+        for i in 0..segment.capacity {
+            let page = Segment::page(segment, i);
+            if !page.segment_in_use.get() {
+                nfree += 1;
+            }
+            if page.segment_in_use.get() {
+                expensive_assert!(!data.pages_purge.contains(page, Page::node));
+            }
+        }
+        internal_assert!(nfree + segment.used.get() == segment.capacity);
+        internal_assert!(segment.raw_page_size() * segment.capacity == segment.segment_size);
+    }
+
     #[inline]
     pub unsafe fn page(segment: Whole<Segment>, index: usize) -> Whole<Page> {
+        internal_assert!(index < segment.capacity);
         Whole::new_unchecked(segment.as_ptr().add(1).cast::<Page>().add(index))
     }
 
@@ -159,6 +186,7 @@ impl Segment {
         segment: Whole<Segment>,
         ptr: Whole<AllocatedBlock>,
     ) -> usize {
+        // V
         let diff = ptr.as_ptr().byte_offset_from(segment.as_ptr());
         internal_assert!(
             diff >= 0 && (diff as usize) <= SEGMENT_SIZE /* for huge alignment it can be equal */
@@ -174,29 +202,20 @@ impl Segment {
         segment: Whole<Segment>,
         ptr: Whole<AllocatedBlock>,
     ) -> Whole<Page> {
+        // V
         Segment::page(segment, Segment::page_index_from_pointer(segment, ptr))
     }
 
     #[inline]
     unsafe fn has_free(&self) -> bool {
+        // V
         self.used.get() < self.capacity
     }
 
     #[inline]
     pub unsafe fn is_local(&self) -> bool {
+        // V
         thread_id() == self.thread_id.load(Ordering::Relaxed)
-    }
-
-    #[inline]
-    pub unsafe fn from_pointer_checked(ptr: Whole<AllocatedBlock>) -> Whole<Segment> {
-        internal_assert!(ptr.as_ptr().addr() & !(WORD_SIZE - 1) != 0);
-
-        let segment = Segment::from_pointer(ptr);
-
-        #[cfg(debug_assertions)]
-        assert_eq!((*segment.as_ptr()).cookie, cookie(segment));
-
-        segment
     }
 
     // Segment that contains the pointer
@@ -205,12 +224,27 @@ impl Segment {
     // therefore we align one byte before `p`.
     #[inline]
     pub unsafe fn from_pointer(ptr: Whole<AllocatedBlock>) -> Whole<Segment> {
-        ptr.map_addr(|addr| (addr - 1) & !SEGMENT_MASK).cast()
+        // V
+
+        let segment: Whole<Segment> = ptr
+            .map_addr(|addr| align_down(addr - 1, SEGMENT_ALIGN))
+            .cast();
+
+        #[cfg(debug_assertions)]
+        internal_assert!(segment.cookie == cookie(segment));
+
+        if segment.page_kind < PageKind::Huge {
+            internal_assert!(ptr.as_ptr().is_aligned_to(WORD_SIZE));
+        }
+
+        segment
     }
 
     #[inline]
     unsafe fn raw_page_size(&self) -> usize {
+        // V
         if self.page_kind == PageKind::Huge {
+            internal_assert!(self.capacity == 1);
             self.segment_size
         } else {
             1 << self.page_shift
@@ -220,6 +254,9 @@ impl Segment {
     // Raw start of the page available memory; can be used on uninitialized pages (only `segment_idx` must be set)
     // The raw start is not taking aligned block allocation into consideration.
     unsafe fn raw_page_start(segment: Whole<Segment>, page: Whole<Page>) -> (Whole<u8>, usize) {
+        // V
+        internal_assert!((page.segment_idx as usize) < segment.capacity);
+
         let mut page_size = segment.raw_page_size();
         let mut p = segment
             .as_ptr()
@@ -233,7 +270,12 @@ impl Segment {
             page_size -= segment.segment_info_size;
         }
 
-        (Whole::new_unchecked(p), page_size)
+        let p = Whole::new_unchecked(p);
+
+        internal_assert!(Segment::from_pointer(p.cast()) == segment);
+        internal_assert!(Segment::page_from_pointer(segment, p.cast()) == page);
+
+        (p, page_size)
     }
 
     // Start of the page available memory; can be used on uninitialized pages (only `segment_idx` must be set)
@@ -243,6 +285,7 @@ impl Segment {
         block_size: usize,
         pre_size: &mut usize,
     ) -> (Whole<u8>, usize) {
+        // V
         let (mut p, mut page_size) = Segment::raw_page_start(segment, page);
         *pre_size = 0;
         if let Some(non_zero_block_size) = NonZeroUsize::new(block_size) {
@@ -251,40 +294,44 @@ impl Segment {
 
                 // for small and medium objects, ensure the page start is aligned with the block size (PR#66 by kickunderscore)
                 let adjust = block_size - rem(p.addr(), non_zero_block_size);
-                if page_size - adjust >= block_size && adjust < block_size {
-                    p = Whole::new_unchecked(p.as_ptr().add(adjust));
-                    page_size -= adjust;
-                    *pre_size = adjust;
+                if page_size - adjust >= block_size {
+                    if adjust < block_size {
+                        p = Whole::new_unchecked(p.as_ptr().add(adjust));
+                        page_size -= adjust;
+                        *pre_size = adjust;
+                    }
+                    internal_assert!(p.addr() % block_size == 0);
                 }
             }
         }
 
+        internal_assert!(Segment::from_pointer(p.cast()) == segment);
+        internal_assert!(Segment::page_from_pointer(segment, p.cast()) == page);
+
         (p, page_size)
     }
-
-    /* -----------------------------------------------------------
-       Page allocation
-    ----------------------------------------------------------- */
 
     unsafe fn page_ensure_committed(
         segment: Whole<Segment>,
         page: Whole<Page>,
-        _data: &mut SegmentThreadData,
+        data: &mut SegmentThreadData,
     ) -> bool {
+        // V
         if page.is_committed.get() {
             return true;
         }
 
         internal_assert!(segment.allow_decommit);
-        // mi_assert_expensive(!mi_pages_purge_contains(page, tld));
+        expensive_assert!(!data.pages_purge.contains(page, Page::node));
 
         let (start, psize) = Segment::raw_page_start(segment, page);
 
         //     let is_zero = false;
 
         if !system::commit(Ptr::new_unchecked(start.as_ptr()), psize) {
+            // failed to commit!
             return false;
-        } // failed to commit!
+        }
         page.is_committed.set(true);
 
         page.used.set(0);
@@ -299,6 +346,7 @@ impl Segment {
         page: Whole<Page>,
         data: &mut SegmentThreadData,
     ) -> bool {
+        // V
         internal_assert!(Page::segment(page) == segment);
         internal_assert!(!page.segment_in_use.get());
 
@@ -329,8 +377,9 @@ impl Segment {
         segment: Whole<Segment>,
         data: &mut SegmentThreadData,
     ) -> Option<Whole<Page>> {
-        //   mi_assert_internal(mi_segment_has_free(segment));
-        //  mi_assert_expensive(mi_segment_is_valid(segment, tld));
+        // V
+        internal_assert!(segment.has_free());
+        Segment::validate(segment, data);
         for i in 0..segment.capacity {
             // TODO: use a bitmap instead of search?
             let page = Segment::page(segment, i);
@@ -506,6 +555,7 @@ impl Segment {
             .pad_to_align();
 
         internal_assert!(metadata.align() <= SEGMENT_ALIGN);
+        internal_assert!(metadata.align() >= WORD_SIZE);
 
         // Pad to the requested page alignment.
         let layout = metadata.align_to(page_alignment).ok()?.pad_to_align();

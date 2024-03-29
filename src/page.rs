@@ -1,9 +1,11 @@
 use crate::heap::Heap;
 use crate::linked_list::{List, Node};
-use crate::segment::{Segment, SegmentThreadData, Whole, WholeOrStatic, OPTION_PURGE_DELAY};
+use crate::segment::{
+    cookie, Segment, SegmentThreadData, Whole, WholeOrStatic, OPTION_PURGE_DELAY, SEGMENT_ALIGN,
+};
 use crate::{
-    bin_index, compare_exchange_weak_acq_rel, compare_exchange_weak_release, div, rem, system,
-    thread_id, yield_now, Ptr, BINS, BIN_FULL, BIN_FULL_BLOCK_SIZE, BIN_HUGE_BLOCK_SIZE,
+    align_down, bin_index, compare_exchange_weak_acq_rel, compare_exchange_weak_release, div, rem,
+    system, thread_id, yield_now, Ptr, BINS, BIN_FULL, BIN_FULL_BLOCK_SIZE, BIN_HUGE_BLOCK_SIZE,
     LARGE_OBJ_SIZE_MAX, LOCAL_HEAP, MAX_EXTEND_SIZE, MIN_EXTEND, SMALL_OBJ_SIZE_MAX, WORD_SIZE,
 };
 use bitflags::bitflags;
@@ -476,7 +478,13 @@ impl Page {
     /// This cannot use `&self` as we'd can't recover *mut Segment from it.
     #[inline]
     pub unsafe fn segment(page: Whole<Page>) -> Whole<Segment> {
-        let segment = Segment::from_pointer(page.cast());
+        // V
+
+        let segment: Whole<Segment> = page.map_addr(|addr| align_down(addr, SEGMENT_ALIGN)).cast();
+
+        #[cfg(debug_assertions)]
+        assert_eq!((*segment.as_ptr()).cookie, cookie(segment));
+
         internal_assert!(page == Segment::page(segment, page.segment_idx as usize));
         segment
     }
@@ -726,7 +734,7 @@ impl Page {
     // return true if successful
     pub unsafe fn free_delayed_block(block: Whole<FreeBlock>) -> bool {
         // get segment and page
-        let segment = Segment::from_pointer_checked(block.cast());
+        let segment = Segment::from_pointer(block.cast());
         internal_assert!(thread_id() == segment.thread_id.load(Ordering::Relaxed));
         let page = Segment::page_from_pointer(segment, block.cast());
 

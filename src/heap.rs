@@ -510,7 +510,7 @@ impl Heap {
 
     #[inline]
     pub unsafe fn free(ptr: Whole<AllocatedBlock>) {
-        let segment = Segment::from_pointer_checked(ptr);
+        let segment = Segment::from_pointer(ptr);
         let is_local = segment.is_local();
         let page = Segment::page_from_pointer(segment, ptr);
 
@@ -578,7 +578,7 @@ impl Heap {
 
     #[inline]
     pub unsafe fn usable_size(block: Whole<AllocatedBlock>) -> usize {
-        let segment = Segment::from_pointer_checked(block);
+        let segment = Segment::from_pointer(block);
         let page = Segment::page_from_pointer(segment, block);
         let block_size = Page::actual_block_size(page);
         if likely(!page.flags().contains(PageFlags::HAS_ALIGNED)) {
