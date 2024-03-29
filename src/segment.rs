@@ -1048,6 +1048,7 @@ impl Segment {
     }
 
     unsafe fn free(segment: Whole<Segment>, data: &mut SegmentThreadData) {
+        // V
         // don't purge as we are freeing now
         Segment::remove_all_purges(segment, false, data); /* don't force as we are about to free */
         Segment::remove_from_free_queue(segment, data);
@@ -1061,6 +1062,7 @@ impl Segment {
 
     // remove from free queue if it is in one
     unsafe fn remove_from_free_queue(segment: Whole<Segment>, data: &mut SegmentThreadData) {
+        // V
         let queue = SegmentThreadData::free_queue_of_kind(data, segment.page_kind);
         if let Some(queue) = queue {
             if (*queue).may_contain(segment, Segment::node) {
@@ -1083,8 +1085,10 @@ impl Segment {
     ----------------------------------------------------------- */
 
     unsafe fn abandon(segment: Whole<Segment>, data: &mut SegmentThreadData) {
+        // V
         internal_assert!(segment.used.get() == segment.abandoned.get());
         internal_assert!(segment.used.get() > 0);
+        Segment::validate(segment, data);
 
         // Potentially force purge. Only abandoned segments in arena memory can be
         // reclaimed without a free so if a segment is not from an arena we force purge here to be conservative.
@@ -1095,6 +1099,7 @@ impl Segment {
 
         // remove the segment from the free page queue if needed
         Segment::remove_from_free_queue(segment, data);
+        internal_assert!(!segment.node.used());
 
         // all pages in the segment are abandoned; add it to the abandoned list
 
@@ -1110,13 +1115,12 @@ impl Segment {
 
     unsafe fn insert_in_free_queue(segment: Whole<Segment>, data: &mut SegmentThreadData) {
         let queue = SegmentThreadData::free_queue_of_kind(data, segment.page_kind);
-        // FIXME, is this true? There doesn't seem to be a clear invariant here.
-        internal_assert!(queue.is_some());
         queue.unwrap_unchecked().push_back(segment, Segment::node);
     }
 
     pub unsafe fn page_free(page: Whole<Page>, _force: bool, data: &mut SegmentThreadData) {
         let segment = Page::segment(page);
+        Segment::validate(segment, data);
         Segment::pages_try_purge(data);
 
         // mark it as free now
@@ -1129,6 +1133,8 @@ impl Segment {
             // only abandoned pages; remove from free list and abandon
             Segment::abandon(segment, data);
         } else if segment.used.get() + 1 == segment.capacity {
+            // Large and huge pages only have a single page, so they won't hit this case.
+            internal_assert!(segment.page_kind <= PageKind::Medium);
             Segment::insert_in_free_queue(segment, data);
         }
     }
