@@ -43,6 +43,23 @@ pub struct FreeBlock {
     pub next: Cell<Option<Whole<FreeBlock>>>,
 }
 
+pub(crate) struct BlockListIter {
+    current: Option<Whole<FreeBlock>>,
+}
+
+impl Iterator for BlockListIter {
+    type Item = Whole<FreeBlock>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(current) = self.current {
+            self.current = current.next.get();
+            Some(current)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct BlockList {
     pub first: Cell<Option<Whole<FreeBlock>>>,
@@ -58,6 +75,34 @@ impl BlockList {
     #[inline]
     pub unsafe fn is_empty(&self) -> bool {
         self.first.get().is_none()
+    }
+
+    #[inline]
+    pub unsafe fn iter(&self) -> BlockListIter {
+        BlockListIter {
+            current: self.first.get(),
+        }
+    }
+
+    #[inline]
+    pub unsafe fn validate(&self, page: Whole<Page>) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+
+        let (start, size) = Page::page_start(page, Page::segment(page));
+        let start = start.as_ptr();
+        let end = start.add(size);
+
+        for block in self.iter() {
+            internal_assert!(block.as_ptr().cast() >= start);
+            internal_assert!(block.as_ptr().cast() < end);
+        }
+    }
+
+    #[inline]
+    pub unsafe fn count(&self) -> usize {
+        self.iter().count()
     }
 
     #[inline]
@@ -228,7 +273,7 @@ impl PageQueue {
         internal_assert!(bin <= BIN_FULL);
         let queue = Heap::page_queue(heap, bin);
         internal_assert!(bin >= BINS || page.block_size() == queue.block_size);
-        //  mi_assert_expensive(mi_page_queue_contains(pq, page));
+        expensive_assert!(queue.list.contains(page, Page::node));
         queue
     }
 
@@ -634,6 +679,72 @@ impl Page {
         Page::free(page, queue, false);
     }
 
+    pub unsafe fn validate_init(page: Whole<Page>) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+
+        internal_assert!(page.block_size() > 0);
+        internal_assert!(page.used.get() <= page.capacity.get() as u32);
+        internal_assert!(page.capacity.get() <= page.reserved.get());
+
+        let segment = Page::segment(page);
+        let _ = Page::page_start(page, segment);
+        //internal_assert!(start + page.capacity*page.block_size == page.top);
+
+        page.free_blocks.validate(page);
+        page.local_deferred_free_blocks.validate(page);
+
+        /*
+          #if MI_DEBUG>3 // generally too expensive to check this
+          if (page.free_is_zero) {
+            const size_t ubsize = mi_page_usable_block_size(page);
+            for(mi_block_t* block = page.free; block != NULL; block = mi_block_next(page,block)) {
+              mi_assert_expensive(mi_mem_is_zero(block + 1, ubsize - sizeof(mi_block_t)));
+            }
+          }
+          #endif
+        */
+        /*
+          #if !MI_TRACK_ENABLED && !MI_TSAN
+          mi_block_t* tfree = mi_page_thread_free(page);
+          internal_assert!(mi_page_list_is_valid(page, tfree));
+          //size_t tfree_count = mi_page_list_count(page, tfree);
+          //internal_assert!(tfree_count <= page.thread_freed + 1);
+          #endif
+        */
+
+        let free_count = page.free_blocks.count() + page.local_deferred_free_blocks.count();
+        internal_assert!(page.used.get() as usize + free_count == page.capacity.get() as usize);
+    }
+
+    pub unsafe fn validate(page: Whole<Page>) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+
+        Page::validate_init(page);
+
+        if !page.heap.load(Ordering::Relaxed).is_null() {
+            let heap = page.local_heap();
+            let segment = Page::segment(page);
+            internal_assert!(
+                segment.thread_id.load(Ordering::Relaxed) == thread_id()
+                    || segment.thread_id.load(Ordering::Relaxed) == 0
+            );
+
+            let queue = PageQueue::from_page(page);
+            internal_assert!(queue.list.contains(page, Page::node));
+            let block_size = Page::actual_block_size(page);
+            internal_assert!(
+                queue.block_size == block_size
+                    || block_size > LARGE_OBJ_SIZE_MAX
+                    || page.flags().contains(PageFlags::IN_FULL)
+            );
+            internal_assert!(Heap::contains_queue(heap, queue));
+        }
+    }
+
     pub unsafe fn free(page: Whole<Page>, queue: Ptr<PageQueue>, force: bool) {
         // no more aligned blocks in here
         (*page).remove_flags(PageFlags::HAS_ALIGNED);
@@ -966,10 +1077,13 @@ impl Page {
         let heap = (*page).local_heap();
 
         let pqfull = Heap::page_queue(heap, BIN_FULL);
-        (*page).remove_flags(PageFlags::IN_FULL); // to get the right queue
-        let pq = PageQueue::from_page_and_heap(page, heap);
-        (*page).insert_flags(PageFlags::IN_FULL);
-        PageQueue::enqueue_from(pq, pqfull, page);
+
+        let bin = bin_index(page.block_size());
+        internal_assert!(bin < BIN_FULL);
+        let queue = Heap::page_queue(heap, bin);
+        internal_assert!(page.block_size() == queue.block_size);
+
+        PageQueue::enqueue_from(queue, pqfull, page);
     }
 
     // Start of the page available memory; can be used on uninitialized pages (only `segment_idx` must be set)

@@ -2,7 +2,7 @@ use crate::page::{AllocatedBlock, DelayedMode, FreeBlock, Page, PageFlags, PageK
 use crate::segment::{Segment, SegmentThreadData, Whole, WholeOrStatic};
 use crate::{
     align_up, bin_index, compare_exchange_weak_acq_rel, compare_exchange_weak_release, index_array,
-    system, word_count, yield_now, Ptr, BIN_FULL, BIN_FULL_BLOCK_SIZE, BIN_HUGE,
+    system, thread_id, word_count, yield_now, Ptr, BIN_FULL, BIN_FULL_BLOCK_SIZE, BIN_HUGE,
     BIN_HUGE_BLOCK_SIZE, LARGE_OBJ_SIZE_MAX, MEDIUM_ALIGN_MAX, MEDIUM_ALIGN_MAX_SIZE, SMALL_ALLOC,
     SMALL_ALLOC_WORDS, SMALL_SIZE_MAX, WORD_SIZE,
 };
@@ -206,6 +206,7 @@ impl Heap {
     }
 
     unsafe fn delayed_free_all(heap: Ptr<Heap>) {
+        // V
         while !Heap::delayed_free_partial(heap) {
             yield_now();
         }
@@ -213,6 +214,8 @@ impl Heap {
 
     // returns true if all delayed frees were processed
     unsafe fn delayed_free_partial(heap: Ptr<Heap>) -> bool {
+        // V
+
         // take over the list (note: no atomic exchange since it is often NULL)
         let mut block = heap.thread_delayed_free.load(Ordering::Relaxed);
         while !block.is_null()
@@ -248,6 +251,7 @@ impl Heap {
         heap: Ptr<Heap>,
         mut visitor: impl FnMut(Whole<Page>, Ptr<PageQueue>) -> bool,
     ) -> bool {
+        // V
         if heap.page_count.get() == 0 {
             return false;
         }
@@ -272,6 +276,7 @@ impl Heap {
 
     #[inline]
     pub unsafe fn done(heap: Ptr<Heap>) {
+        // V
         if heap.state.get() == HeapState::Uninit {
             return;
         }
@@ -291,10 +296,27 @@ impl Heap {
     }
 
     #[inline]
+    pub fn contains_queue(heap: Ptr<Heap>, queue: Ptr<PageQueue>) -> bool {
+        let queue = queue.as_ptr().cast_const();
+        heap.page_queues.as_ptr() <= queue
+            && queue < unsafe { heap.page_queues.as_ptr().add(heap.page_queues.len()) }
+    }
+
+    #[inline]
+    pub unsafe fn validate_page(heap: Ptr<Heap>, page: Whole<Page>) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+
+        internal_assert!(page.local_heap() == heap);
+        let segment = Page::segment(page);
+        internal_assert!(segment.thread_id.load(Ordering::Relaxed) == thread_id());
+        Page::validate(page);
+    }
+
+    #[inline]
     unsafe fn collect(heap: Ptr<Heap>, collect: Collect) {
         internal_assert!(heap.state.get() == HeapState::Active);
-
-        // if (heap==NULL || !mi_heap_is_initialized(heap)) return;
 
         // (*heap).thread_data.heartbeat += 1;
 
@@ -334,7 +356,7 @@ impl Heap {
 
         // collect all pages owned by this thread
         Heap::visit_pages(heap, |page, queue| {
-            //mi_assert_internal(mi_heap_page_is_valid(heap, pq, page, NULL, NULL));
+            Heap::validate_page(heap, page);
             Page::free_collect(page, collect >= Collect::Force);
             if page.all_free() {
                 // no more used blocks, free the page.
@@ -354,7 +376,7 @@ impl Heap {
 
         // collect segment and thread caches
         if collect >= Collect::Force {
-            //    _mi_segment_thread_collect(&(*heap).thread_data.segment);
+            internal_assert!(heap.thread_data().segment.pages_purge.is_empty());
         }
 
         /*

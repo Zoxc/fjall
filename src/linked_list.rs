@@ -56,6 +56,11 @@ impl<T: Copy + PartialEq> List<T> {
         }
     }
 
+    #[inline]
+    pub unsafe fn is_empty(&self) -> bool {
+        self.first.get().is_none()
+    }
+
     pub unsafe fn only_entry(&self, element: T) -> bool {
         self.first.get() == Some(element) && self.last.get() == Some(element)
     }
