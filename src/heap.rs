@@ -316,6 +316,7 @@ impl Heap {
 
     #[inline]
     unsafe fn collect(heap: Ptr<Heap>, collect: Collect) {
+        // V
         internal_assert!(heap.state.get() == HeapState::Active);
 
         // (*heap).thread_data.heartbeat += 1;
@@ -391,6 +392,7 @@ impl Heap {
     // free retired pages: we don't need to look at the entire queues
     // since we only retire pages that are at the head position in a queue.
     pub unsafe fn collect_retired(heap: Ptr<Heap>, force: bool) {
+        // V
         let mut min = BIN_FULL;
         let mut max = 0;
         for bin in heap.page_retired_min.get()..=heap.page_retired_max.get() {
@@ -428,6 +430,8 @@ impl Heap {
     // range of entries in `_mi_page_small_free`.
     #[inline]
     pub unsafe fn queue_first_update(heap: Ptr<Heap>, queue: Ptr<PageQueue>) {
+        // V
+        internal_assert!(Heap::contains_queue(heap, queue));
         let size = queue.block_size;
         if size > SMALL_ALLOC {
             return;
@@ -468,6 +472,7 @@ impl Heap {
         // set size range to the right page
         internal_assert!(start <= idx);
         for sz in start..=idx {
+            internal_assert!(sz < (*heap.pages_free.get()).len());
             *pages_free.add(sz) = page.or_static();
         }
     }
@@ -488,12 +493,14 @@ impl Heap {
 
     #[inline]
     unsafe fn find_free_page(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<Page>> {
+        // V
         let queue = Heap::page_queue_for_size(heap, layout.size());
         let page = queue.list.first.get();
         if let Some(page) = page {
             Page::free_collect(page, false);
 
             if page.immediately_available() {
+                page.retire_expire.set(0);
                 return Some(page);
             }
         }
@@ -503,6 +510,7 @@ impl Heap {
 
     #[inline]
     unsafe fn find_page(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<Page>> {
+        // V
         if unlikely(layout.size() > LARGE_OBJ_SIZE_MAX || layout.align() > WORD_SIZE) {
             if unlikely(layout.size() > isize::MAX as usize) {
                 None
@@ -521,6 +529,7 @@ impl Heap {
         is_local: bool,
         ptr: Whole<AllocatedBlock>,
     ) {
+        // V
         let block = if (*page).flags().contains(PageFlags::HAS_ALIGNED) {
             Page::unalign_pointer(page, segment, ptr)
         } else {
@@ -532,6 +541,7 @@ impl Heap {
 
     #[inline]
     pub unsafe fn free(ptr: Whole<AllocatedBlock>) {
+        // V
         let segment = Segment::from_pointer(ptr);
         let is_local = segment.is_local();
         let page = Segment::page_from_pointer(segment, ptr);
@@ -545,8 +555,9 @@ impl Heap {
 
                 // mi_check_padding(page, block);
                 page.local_deferred_free_blocks.push_front(block);
-                page.used.set(page.used.get() - 1);
-                if unlikely(page.used.get() == 0) {
+                let used = page.used.get() - 1;
+                page.used.set(used);
+                if unlikely(used == 0) {
                     Page::retire(page);
                 }
             } else {
@@ -565,13 +576,14 @@ impl Heap {
     // that frees the block can free the whole page and segment directly.
     // Huge pages are also used if the requested alignment is very large (> MI_ALIGNMENT_MAX).
     unsafe fn alloc_huge(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<Page>> {
+        // V
         let block_size = layout.size(); //_mi_os_good_alloc_size(size);
         internal_assert!(bin_index(block_size) == BIN_HUGE || layout.align() > WORD_SIZE);
 
-        let pq = Heap::page_queue(heap, BIN_HUGE); // not block_size as that can be low if the page_alignment > 0
-        internal_assert!((*pq).is_huge());
+        let queue = Heap::page_queue(heap, BIN_HUGE); // not block_size as that can be low if the page_alignment > 0
+        internal_assert!((*queue).is_huge());
 
-        let page = Page::fresh_alloc(heap, pq, block_size, layout.align());
+        let page = Page::fresh_alloc(heap, queue, block_size, layout.align());
         if let Some(page) = page {
             let bsize = Page::actual_block_size(page); // note: not `mi_page_usable_block_size` as `size` includes padding already
             internal_assert!(bsize >= layout.size());
@@ -585,6 +597,7 @@ impl Heap {
     #[inline]
     pub unsafe fn alloc_small(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<AllocatedBlock>> {
         internal_assert!(layout.align() <= WORD_SIZE);
+        internal_assert!(layout.size() <= SMALL_ALLOC);
         let page = (*heap.pages_free.get())[word_count(layout.size())];
         Page::alloc_small(page, layout, heap)
     }
@@ -671,6 +684,7 @@ impl Heap {
     }
 
     pub unsafe fn alloc_generic(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<AllocatedBlock>> {
+        // V
         internal_assert!(!Self::adjust_alignment(layout));
 
         if unlikely(heap.state.get() != HeapState::Active) {
@@ -692,7 +706,7 @@ impl Heap {
 
         let mut page = Heap::find_page(heap, layout);
 
-        if page.is_none() {
+        if unlikely(page.is_none()) {
             Heap::collect(heap, Collect::Force);
             page = Heap::find_page(heap, layout);
         }

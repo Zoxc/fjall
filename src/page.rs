@@ -1178,6 +1178,7 @@ impl Page {
 
     #[inline]
     pub unsafe fn alloc_free(page: WholeOrStatic<Page>) -> Option<Whole<AllocatedBlock>> {
+        // V
         page.free_blocks.pop_front().map(|block| {
             page.used.set(page.used.get().wrapping_add(1));
             block.cast()
@@ -1190,6 +1191,7 @@ impl Page {
         layout: Layout,
         heap: Ptr<Heap>,
     ) -> Option<Whole<AllocatedBlock>> {
+        // V
         internal_assert!(layout.align() <= WORD_SIZE);
         Page::alloc_free(page).or_else(|| Heap::alloc_generic(heap, layout))
     }
