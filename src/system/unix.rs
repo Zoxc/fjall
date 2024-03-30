@@ -68,26 +68,23 @@ pub struct SystemAllocation {
 
 #[cfg(not(feature = "system-allocator"))]
 pub unsafe fn commit(ptr: Ptr<u8>, size: usize) -> bool {
-    /*
     let result = libc::mprotect(ptr.as_ptr().cast(), size, PROT_READ | PROT_WRITE);
     internal_assert!(result == 0);
-    result == 0*/
-    true
+    result == 0
 }
 
 #[cfg(not(feature = "system-allocator"))]
 pub unsafe fn decommit(ptr: Ptr<u8>, size: usize) -> bool {
-    /*
     // decommit: use MADV_DONTNEED as it decreases rss immediately (unlike MADV_FREE)
     let result = libc::madvise(ptr.as_ptr().cast(), size, MADV_DONTNEED);
-    internal_assert!(result == 0);*/
+    internal_assert!(result == 0);
     false
 }
 
 #[cfg(not(feature = "system-allocator"))]
 pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>, bool)> {
     let size = layout.size().checked_add(layout.align() - 1)?;
-    let protect_flags = if true {
+    let protect_flags = if commit {
         PROT_WRITE | PROT_READ
     } else {
         PROT_NONE
@@ -113,7 +110,7 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
         let unmap = |start: usize, end: usize| {
             let len = end.wrapping_sub(start);
             if len > 0 && !cfg!(miri) {
-                //   libc::munmap(result.with_addr(start).cast(), len);
+                libc::munmap(result.with_addr(start).cast(), len);
             }
         };
 
