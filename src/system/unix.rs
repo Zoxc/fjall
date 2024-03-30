@@ -119,7 +119,8 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
             ));
             let len = end.wrapping_sub(start);
             if len > 0 && !cfg!(miri) {
-                libc::munmap(result.with_addr(start).cast(), len);
+                let result = libc::munmap(result.with_addr(start).cast(), len);
+                internal_assert!(result == 0);
             }
         };
 
@@ -135,8 +136,15 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
 }
 
 #[cfg(not(feature = "system-allocator"))]
-pub unsafe fn dealloc(alloc: SystemAllocation, __ptr: Ptr<u8>, layout: Layout) {
-    let size = layout.size() + layout.align() - 1;
-    let result = libc::munmap(alloc.base, size);
+pub unsafe fn dealloc(_alloc: SystemAllocation, ptr: Ptr<u8>, layout: Layout) {
+    let page_size = page_size();
+
+    let start = align_down(ptr.addr(), page_size);
+    let end = wrapped_align_up(ptr.addr() + layout.size(), page_size);
+
+    let result = libc::munmap(
+        ptr.as_ptr().with_addr(start).cast(),
+        end.wrapping_sub(start),
+    );
     internal_assert!(result == 0);
 }
