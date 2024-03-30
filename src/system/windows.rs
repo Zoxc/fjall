@@ -6,7 +6,7 @@ use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_DETACH, DLL_THREAD_
 #[cfg(not(feature = "system-allocator"))]
 use {
     crate::Ptr,
-    crate::{align_up, system},
+    crate::{align_up, system, validate_align},
     sptr::Strict,
     std::alloc::Layout,
     std::cmp::min,
@@ -159,7 +159,7 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
         )
     };
     let result: Ptr<u8> = unsafe { Ptr::new(result.cast())? };
-    internal_assert!(result.as_ptr().is_aligned_to(layout.align()));
+    validate_align(result.as_ptr(), layout.align());
     Some((SystemAllocation, result, commit))
 }
 

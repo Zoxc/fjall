@@ -1,5 +1,6 @@
 use crate::{
-    alloc_padded_end, free_padded_end, heap::Heap, segment::Whole, with_heap, PADDING, WORD_SIZE,
+    alloc_padded_end, free_padded_end, heap::Heap, segment::Whole, validate_align, with_heap,
+    PADDING, WORD_SIZE,
 };
 use libc::{EINVAL, ENOMEM};
 use sptr::Strict;
@@ -22,7 +23,7 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
     if ptr.is_null() {
         return;
     }
-    internal_assert!(ptr.is_aligned_to(WORD_SIZE));
+    validate_align(ptr, WORD_SIZE);
     free_padded_end(Whole::new_unchecked(ptr.cast()))
 }
 
@@ -71,7 +72,7 @@ pub extern "C" fn aligned_alloc(align: usize, size: usize) -> *mut c_void {
                 Layout::from_size_align_unchecked(size, align),
             ))
         });
-        internal_assert!(result.is_aligned_to(align));
+        validate_align(result, align);
         result.cast()
     }
 }

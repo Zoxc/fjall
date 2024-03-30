@@ -5,7 +5,8 @@ use crate::page::{
     MEDIUM_PAGE_SHIFT, SMALL_PAGE_SIZE,
 };
 use crate::{
-    align_down, rem, system, thread_id, Ptr, LARGE_OBJ_SIZE_MAX, MEDIUM_OBJ_SIZE_MAX, WORD_SIZE,
+    align_down, rem, system, thread_id, validate_align, Ptr, LARGE_OBJ_SIZE_MAX,
+    MEDIUM_OBJ_SIZE_MAX, WORD_SIZE,
 };
 use crate::{
     heap::Heap,
@@ -234,7 +235,7 @@ impl Segment {
         internal_assert!(segment.cookie == cookie(segment));
 
         if segment.page_kind < PageKind::Huge {
-            internal_assert!(ptr.as_ptr().is_aligned_to(WORD_SIZE));
+            validate_align(ptr.as_ptr(), WORD_SIZE);
         }
 
         segment
@@ -628,8 +629,8 @@ impl Segment {
        || data.count >= OPTION_EAGER_DELAY_COUNT;
 
         let (system_alloc, allocation, initially_committed) = system::alloc(layout, commit)?;
-        internal_assert!(allocation.as_ptr().is_aligned_to(layout.align()));
-        internal_assert!(allocation.as_ptr().is_aligned_to(SEGMENT_SIZE));
+        validate_align(allocation.as_ptr(), layout.align());
+        validate_align(allocation.as_ptr(), SEGMENT_SIZE);
 
         // We cannot use the last byte in the address space.
         internal_assert!(allocation
@@ -814,7 +815,7 @@ impl Segment {
 
         let (start, psize) = Segment::page_start(segment, page, 0, &mut 0);
         internal_assert!(psize >= size);
-        internal_assert!(start.as_ptr().is_aligned_to(page_alignment));
+        validate_align(start.as_ptr(), page_alignment);
 
         /*
         // reset the part of the page that will not be used; this can be quite large (close toSEGMENT_SIZE)

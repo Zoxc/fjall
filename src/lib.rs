@@ -1,10 +1,4 @@
-#![feature(
-    core_intrinsics,
-    const_refs_to_static,
-    pointer_is_aligned,
-    allocator_api,
-    lazy_cell
-)]
+#![feature(core_intrinsics, const_refs_to_static, allocator_api, lazy_cell)]
 #![allow(
     unstable_name_collisions,
     internal_features,
@@ -261,6 +255,12 @@ fn checked_align_up(val: usize, align: usize) -> Option<usize> {
     Some((val.checked_add(align - 1)?) & !(align - 1))
 }
 
+#[inline(always)]
+fn validate_align<T>(ptr: *mut T, align: usize) {
+    internal_assert!(align.is_power_of_two());
+    internal_assert!(ptr.addr() & (align - 1) == 0);
+}
+
 /// Returns the number of words in `size` rounded up.
 #[inline(always)]
 fn word_count(size: usize) -> usize {
@@ -502,14 +502,14 @@ pub unsafe fn alloc(layout: Layout) -> *mut u8 {
     let result = with_heap(|heap| Whole::as_maybe_null_ptr(alloc_padded(heap, layout)));
     // `result` may be null due to oom or if the heap
     // is abandoned and later TLS destructors allocate.
-    internal_assert!(result.is_aligned_to(layout.align()));
+    validate_align(result, layout.align());
     result.cast()
 }
 
 #[inline]
 pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
     internal_assert!(!ptr.is_null());
-    internal_assert!(ptr.is_aligned_to(layout.align()));
+    validate_align(ptr, layout.align());
     internal_assert!(layout.size() > 0);
 
     free_padded(Whole::new_unchecked(ptr.cast()), layout)

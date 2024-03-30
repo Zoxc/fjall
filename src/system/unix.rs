@@ -1,7 +1,7 @@
 use crate::heap::Heap;
 use crate::with_heap;
 #[cfg(not(feature = "system-allocator"))]
-use crate::{align_down, align_up, wrapped_align_up, Ptr};
+use crate::{align_down, align_up, validate_align, wrapped_align_up, Ptr};
 use core::mem;
 use libc::c_void;
 #[cfg(not(feature = "system-allocator"))]
@@ -124,8 +124,7 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
             align_up(aligned.addr().wrapping_add(layout.size()), page_size),
             wrapped_align_up(result.addr().wrapping_add(size), page_size),
         );
-
-        internal_assert!(aligned.is_aligned_to(layout.align()));
+        validate_align(aligned, layout.align());
         Some((alloc, Ptr::new_unchecked(aligned), commit))
     }
 }
