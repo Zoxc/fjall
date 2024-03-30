@@ -68,16 +68,21 @@ pub struct SystemAllocation {
 
 #[cfg(not(feature = "system-allocator"))]
 pub unsafe fn commit(ptr: Ptr<u8>, size: usize) -> bool {
+    /*
     let result = libc::mprotect(ptr.as_ptr().cast(), size, PROT_READ | PROT_WRITE);
     internal_assert!(result == 0);
     result == 0
+    */
+    true
 }
 
 #[cfg(not(feature = "system-allocator"))]
 pub unsafe fn decommit(ptr: Ptr<u8>, size: usize) -> bool {
+    /*
     // decommit: use MADV_DONTNEED as it decreases rss immediately (unlike MADV_FREE)
     let result = libc::madvise(ptr.as_ptr().cast(), size, MADV_DONTNEED);
     internal_assert!(result == 0);
+    */
     false
 }
 
@@ -118,7 +123,7 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
         internal_assert!(result.addr() == align_down(result.addr(), page_size));
         unmap(result.addr(), align_down(aligned.addr(), page_size));
         /*unmap(
-            align_up(aligned.addr().wrapping_add(layout.size()), page_size),
+            align_up(aligned.addr() + layout.size(), page_size),
             wrapped_align_up(result.addr().wrapping_add(size), page_size),
         );*/
         validate_align(aligned, layout.align());
