@@ -21,7 +21,6 @@ use page::AllocatedBlock;
 use segment::cookie;
 use sptr::Strict;
 use std::cell::Cell;
-#[cfg(debug_assertions)]
 use std::cmp::max;
 use std::cmp::min;
 use std::fmt::Debug;
