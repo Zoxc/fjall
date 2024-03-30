@@ -117,10 +117,10 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
         let page_size = page_size();
         internal_assert!(result.addr() == align_down(result.addr(), page_size));
         unmap(result.addr(), align_down(aligned.addr(), page_size));
-        unmap(
+        /*unmap(
             align_up(aligned.addr().wrapping_add(layout.size()), page_size),
             wrapped_align_up(result.addr().wrapping_add(size), page_size),
-        );
+        );*/
         validate_align(aligned, layout.align());
         Some((alloc, Ptr::new_unchecked(aligned), commit))
     }
