@@ -140,8 +140,7 @@ pub struct Segment {
     node: Node<Whole<Segment>>,
 }
 
-#[cfg(debug_assertions)]
-#[allow(overflowing_literals)]
+#[allow(overflowing_literals, unused)]
 pub fn cookie<T, A>(ptr: Ptr<T, A>) -> usize {
     ptr.as_ptr().addr() ^ 0xa0f7b251664141e9
 }
@@ -962,7 +961,7 @@ impl Segment {
     unsafe fn page_clear(segment: Whole<Segment>, page: Whole<Page>, data: &mut SegmentThreadData) {
         // V
         internal_assert!(page.segment_in_use.get());
-        internal_assert!((page.all_free()));
+        internal_assert!(page.all_free());
         internal_assert!(page.is_committed.get());
         expensive_assert!(!data.pages_purge.contains(page, Page::node));
 

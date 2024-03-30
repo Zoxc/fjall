@@ -1,7 +1,9 @@
 use crate::heap::Heap;
 use crate::linked_list::{List, Node};
+#[cfg(debug_assertions)]
+use crate::segment::cookie;
 use crate::segment::{
-    cookie, Segment, SegmentThreadData, Whole, WholeOrStatic, OPTION_PURGE_DELAY, SEGMENT_ALIGN,
+    Segment, SegmentThreadData, Whole, WholeOrStatic, OPTION_PURGE_DELAY, SEGMENT_ALIGN,
 };
 use crate::{
     align_down, bin_index, compare_exchange_weak_acq_rel, compare_exchange_weak_release, div, rem,
