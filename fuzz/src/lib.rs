@@ -36,6 +36,13 @@ impl Allocation {
     pub fn new(layout: Layout) -> Option<Allocation> {
         let ptr = unsafe { fjall::alloc(layout) };
         (!ptr.is_null()).then(|| {
+            // Check that the memory is accessible.
+            let key = 0xFE ^ (ptr.addr() >> 16) as u8;
+            unsafe {
+                *ptr = key;
+                *ptr.add(layout.size() - 1) = key;
+            }
+
             unsafe { __asan_poison_memory_region(ptr, layout.size()) };
             Allocation {
                 ptr: AtomicPtr::new(ptr),
@@ -55,8 +62,15 @@ impl Allocation {
 impl Drop for Allocation {
     fn drop(&mut self) {
         unsafe {
-            __asan_unpoison_memory_region(*self.ptr.get_mut(), self.layout.size());
-            fjall::dealloc(*self.ptr.get_mut(), self.layout);
+            let ptr = *self.ptr.get_mut();
+            __asan_unpoison_memory_region(ptr, self.layout.size());
+
+            // Check that the memory is accessible.
+            let key = 0xFE ^ (ptr.addr() >> 16) as u8;
+            *ptr = key;
+            *ptr.add(self.layout.size() - 1) = key;
+
+            fjall::dealloc(ptr, self.layout);
         }
     }
 }
