@@ -758,7 +758,9 @@ impl Page {
             internal_assert!(queue.list.contains(page, Page::node));
             let block_size = Page::actual_block_size(page);
             internal_assert!(
-                queue.block_size == block_size || page.block_size() > LARGE_OBJ_SIZE_MAX
+                queue.block_size == block_size
+                    || page.block_size() > LARGE_OBJ_SIZE_MAX
+                    || page.flags().contains(PageFlags::IN_FULL)
             );
             internal_assert!(Heap::contains_queue(heap, queue));
         }
