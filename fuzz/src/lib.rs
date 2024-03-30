@@ -1,6 +1,7 @@
 #![allow(unstable_name_collisions)]
 
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
+use libfuzzer_sys::Corpus;
 use sptr::Strict;
 use std::alloc::Layout;
 use std::sync::atomic::AtomicPtr;
@@ -66,11 +67,35 @@ pub enum Operation {
     Dealloc { index: usize },
 }
 
+impl Operation {
+    fn valid(&self, limit: usize) -> bool {
+        match self {
+            Operation::Alloc { index: _, layout } => {
+                if layout.size > limit || layout.align > limit {
+                    return false;
+                }
+                let Some(total) = layout.size.checked_add(layout.align) else {
+                    return false;
+                };
+                if !layout.valid() || layout.align > SEGMENT_SIZE || total > MAX_HEAP_SIZE {
+                    return false;
+                }
+                Layout::from_size_align(layout.size, layout.align).is_ok()
+            }
+            Operation::Dealloc { .. } => true,
+        }
+    }
+}
+
 pub const SEGMENT_SIZE: usize = 1 << 21;
 
 pub const MAX_HEAP_SIZE: usize = 4 * 1024 * 1024 * 1024;
 
-pub fn run(methods: Vec<Operation>, limit: usize) {
+pub fn run(methods: Vec<Operation>, limit: usize) -> Corpus {
+    if !methods.iter().all(|o| o.valid(limit)) {
+        return Corpus::Reject;
+    }
+
     let mut allocs: Vec<Allocation> = Vec::new();
 
     let mut heap_size = 0;
@@ -78,18 +103,9 @@ pub fn run(methods: Vec<Operation>, limit: usize) {
     for method in methods {
         match method {
             Operation::Alloc { index, layout } => {
-                if layout.size > limit || layout.align > limit {
-                    continue;
-                }
-                let Some(total) = layout.size.checked_add(layout.align) else {
-                    continue;
-                };
-                if !layout.valid() || layout.align > SEGMENT_SIZE || total > MAX_HEAP_SIZE {
-                    continue;
-                }
-                let Ok(layout) = Layout::from_size_align(layout.size, layout.align) else {
-                    continue;
-                };
+                let total = layout.size + layout.align;
+
+                let layout = Layout::from_size_align(layout.size, layout.align).unwrap();
 
                 // Remove allocations to fit the new one
                 while heap_size + total > MAX_HEAP_SIZE {
@@ -103,12 +119,15 @@ pub fn run(methods: Vec<Operation>, limit: usize) {
                 }
             }
             Operation::Dealloc { index } => {
-                if index < allocs.len() {
+                if !allocs.is_empty() {
+                    let index = index % allocs.len();
                     heap_size -= allocs.swap_remove(index).cost();
                 }
             }
         }
     }
+
+    Corpus::Keep
 }
 
 pub fn overlap(methods: Vec<Operation>, limit: usize) {

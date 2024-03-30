@@ -63,3 +63,10 @@ path = "fuzz_targets/reclaim.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_global_allocator"
+path = "fuzz_targets/global_allocator.rs"
+test = false
+doc = false
+bench = false
