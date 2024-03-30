@@ -20,6 +20,7 @@ use page::AllocatedBlock;
 #[cfg(debug_assertions)]
 use segment::cookie;
 use sptr::Strict;
+use std::alloc::System;
 use std::cell::Cell;
 use std::cmp::max;
 use std::cmp::min;
@@ -525,11 +526,19 @@ pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
 unsafe impl GlobalAlloc for Alloc {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        abort_on_panic(|| alloc(layout))
+        if layout.size() <= SMALL_ALLOC && layout.align() <= WORD_SIZE {
+            abort_on_panic(|| alloc(layout))
+        } else {
+            System.alloc(layout)
+        }
     }
 
     #[inline]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        abort_on_panic(|| dealloc(ptr, layout));
+        if layout.size() <= SMALL_ALLOC && layout.align() <= WORD_SIZE {
+            abort_on_panic(|| dealloc(ptr, layout));
+        } else {
+            System.dealloc(ptr, layout)
+        }
     }
 }
