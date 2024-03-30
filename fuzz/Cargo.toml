@@ -13,7 +13,10 @@ libfuzzer-sys = { version = "0.4.0", features = ["arbitrary-derive"] }
 
 [dependencies.fjall]
 path = ".."
-features = ["system-allocator"]
+
+[features]
+default = ["system-allocator"]
+system-allocator = ["fjall/system-allocator"]
 
 [[bin]]
 name = "fuzz_c_api"

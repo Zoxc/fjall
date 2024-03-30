@@ -229,6 +229,7 @@ const fn div(lhs: usize, rhs: NonZeroUsize) -> usize {
     }
 }
 
+#[allow(unused)]
 fn overlaps(a: Range<usize>, b: Range<usize>) -> bool {
     if a.start <= a.end || b.start <= b.end {
         return false;
@@ -250,7 +251,7 @@ fn align_up(val: usize, align: usize) -> usize {
 
 #[allow(unused)]
 #[inline(always)]
-fn wrapped_align_up(val: usize, align: usize) -> usize {
+fn wrapping_align_up(val: usize, align: usize) -> usize {
     internal_assert!(align.is_power_of_two());
     (val.wrapping_add(align - 1)) & !(align - 1)
 }

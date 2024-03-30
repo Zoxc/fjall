@@ -1,7 +1,7 @@
 use crate::heap::Heap;
 use crate::with_heap;
 #[cfg(not(feature = "system-allocator"))]
-use crate::{align_down, align_up, overlaps, validate_align, wrapped_align_up, Ptr};
+use crate::{align_down, align_up, overlaps, validate_align, wrapping_align_up, Ptr};
 use core::mem;
 use libc::c_void;
 #[cfg(not(feature = "system-allocator"))]
@@ -128,7 +128,7 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
         unmap(result.addr(), align_down(aligned.addr(), page_size));
         unmap(
             align_up(aligned_end, page_size),
-            wrapped_align_up(result.addr().wrapping_add(size), page_size),
+            wrapping_align_up(result.addr().wrapping_add(size), page_size),
         );
         validate_align(aligned, layout.align());
         Some((alloc, Ptr::new_unchecked(aligned), commit))
@@ -140,7 +140,7 @@ pub unsafe fn dealloc(_alloc: SystemAllocation, ptr: Ptr<u8>, layout: Layout) {
     let page_size = page_size();
 
     let start = align_down(ptr.addr(), page_size);
-    let end = wrapped_align_up(ptr.addr() + layout.size(), page_size);
+    let end = wrapping_align_up(ptr.addr() + layout.size(), page_size);
 
     let result = libc::munmap(
         ptr.as_ptr().with_addr(start).cast(),
