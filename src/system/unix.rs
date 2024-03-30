@@ -1,7 +1,7 @@
 use crate::heap::Heap;
 use crate::with_heap;
 #[cfg(not(feature = "system-allocator"))]
-use crate::{align_down, align_up, validate_align, wrapped_align_up, Ptr};
+use crate::{align_down, align_up, overlaps, validate_align, wrapped_align_up, Ptr};
 use core::mem;
 use libc::c_void;
 #[cfg(not(feature = "system-allocator"))]
@@ -68,21 +68,16 @@ pub struct SystemAllocation {
 
 #[cfg(not(feature = "system-allocator"))]
 pub unsafe fn commit(ptr: Ptr<u8>, size: usize) -> bool {
-    /*
     let result = libc::mprotect(ptr.as_ptr().cast(), size, PROT_READ | PROT_WRITE);
     internal_assert!(result == 0);
     result == 0
-    */
-    true
 }
 
 #[cfg(not(feature = "system-allocator"))]
 pub unsafe fn decommit(ptr: Ptr<u8>, size: usize) -> bool {
-    /*
     // decommit: use MADV_DONTNEED as it decreases rss immediately (unlike MADV_FREE)
     let result = libc::madvise(ptr.as_ptr().cast(), size, MADV_DONTNEED);
     internal_assert!(result == 0);
-    */
     false
 }
 
@@ -112,20 +107,28 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
             return None;
         }
 
+        let aligned_end = aligned.addr() + layout.size();
+
+        let page_size = page_size();
+
         let unmap = |start: usize, end: usize| {
+            internal_assert!(!overlaps(start..end, aligned.addr()..aligned_end));
+            internal_assert!(!overlaps(
+                align_down(start, page_size)..align_up(end, page_size),
+                aligned.addr()..aligned_end
+            ));
             let len = end.wrapping_sub(start);
             if len > 0 && !cfg!(miri) {
                 libc::munmap(result.with_addr(start).cast(), len);
             }
         };
 
-        let page_size = page_size();
         internal_assert!(result.addr() == align_down(result.addr(), page_size));
-        //unmap(result.addr(), align_down(aligned.addr(), page_size));
-        /*unmap(
-            align_up(aligned.addr() + layout.size(), page_size),
+        unmap(result.addr(), align_down(aligned.addr(), page_size));
+        unmap(
+            align_up(aligned_end, page_size),
             wrapped_align_up(result.addr().wrapping_add(size), page_size),
-        );*/
+        );
         validate_align(aligned, layout.align());
         Some((alloc, Ptr::new_unchecked(aligned), commit))
     }

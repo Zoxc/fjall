@@ -23,11 +23,12 @@ use sptr::Strict;
 use std::cell::Cell;
 #[cfg(debug_assertions)]
 use std::cmp::max;
+use std::cmp::min;
 use std::fmt::Debug;
 use std::hint::unreachable_unchecked;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 use std::panic::Location;
 use std::ptr::{null_mut, NonNull};
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -226,6 +227,13 @@ const fn div(lhs: usize, rhs: NonZeroUsize) -> usize {
         Some(r) => r,
         None => unsafe { unreachable_unchecked() },
     }
+}
+
+fn overlaps(a: Range<usize>, b: Range<usize>) -> bool {
+    if a.start <= a.end || b.start <= b.end {
+        return false;
+    };
+    max(a.start, b.start) <= min(a.end - 1, b.end - 1)
 }
 
 #[inline(always)]
