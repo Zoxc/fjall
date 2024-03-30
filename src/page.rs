@@ -90,7 +90,7 @@ impl BlockList {
             return;
         }
 
-        let (start, size) = Page::page_start(page, Page::segment(page));
+        let (start, size) = Page::start(page, Page::segment(page));
         let start = start.as_ptr();
         let end = start.add(size);
 
@@ -189,12 +189,13 @@ impl PageQueue {
     }
 
     unsafe fn add(queue: Ptr<PageQueue>, page: Whole<Page>, heap: Ptr<Heap>) {
+        // V
         (*page).assert_heap(Some(heap));
-        //   internal_assert!(!mi_page_queue_contains(queue, page));
-        if (*queue).is_huge() {
-        } else if (*queue).is_full() {
-            internal_assert!((*page).flags().contains(PageFlags::IN_FULL));
-        } else {
+
+        internal_assert!(((page.block_size()) == BIN_HUGE_BLOCK_SIZE) == (*queue).is_huge());
+        internal_assert!((*page).flags().contains(PageFlags::IN_FULL) == (*queue).is_full());
+
+        if !(*queue).is_special() {
             internal_assert!((page.block_size()) == queue.block_size);
         }
 
@@ -209,6 +210,14 @@ impl PageQueue {
     }
 
     unsafe fn remove(queue: Ptr<PageQueue>, page: Whole<Page>) {
+        // V
+        internal_assert!(((page.block_size()) == BIN_HUGE_BLOCK_SIZE) == (*queue).is_huge());
+        internal_assert!((*page).flags().contains(PageFlags::IN_FULL) == (*queue).is_full());
+
+        if !(*queue).is_special() {
+            internal_assert!((page.block_size()) == queue.block_size);
+        }
+
         let heap = (*page).local_heap();
         let update = Some(page) == queue.list.first.get();
 
@@ -224,9 +233,7 @@ impl PageQueue {
     }
 
     unsafe fn enqueue_from(to: Ptr<PageQueue>, from: Ptr<PageQueue>, page: Whole<Page>) {
-        //mi_assert_expensive(mi_page_queue_contains(from, page));
-        // mi_assert_expensive(!mi_page_queue_contains(to, page));
-
+        // V
         #[allow(clippy::nonminimal_bool)]
         {
             internal_assert!(
@@ -245,7 +252,6 @@ impl PageQueue {
         from.list.remove(page, Page::node);
 
         if update {
-            //  mi_assert_internal(mi_heap_contains_queue(heap, from));
             Heap::queue_first_update(heap, from);
         }
 
@@ -265,6 +271,7 @@ impl PageQueue {
     }
 
     unsafe fn from_page_and_heap(page: Whole<Page>, heap: Ptr<Heap>) -> Ptr<PageQueue> {
+        // V
         let bin = if (*page).flags().contains(PageFlags::IN_FULL) {
             BIN_FULL
         } else {
@@ -288,6 +295,7 @@ impl PageQueue {
         heap: Ptr<Heap>,
         first_try: bool,
     ) -> Option<Whole<Page>> {
+        // V
         let mut current = queue.list.first.get();
         while let Some(page) = current {
             let next = page.node.next.get();
@@ -303,6 +311,7 @@ impl PageQueue {
             // 2. Try to extend
             if page.capacity < page.reserved {
                 Page::extend_free(page);
+                internal_assert!(page.immediately_available());
                 break;
             }
 
@@ -313,24 +322,26 @@ impl PageQueue {
             current = next;
         }
 
-        if let Some(page) = current {
+        let result = if let Some(page) = current {
             page.retire_expire.set(0);
-            return current;
-        }
-
-        Heap::collect_retired(heap, false); // perhaps make a page available
-        let page = Page::fresh(heap, queue);
-        if page.is_none() && first_try {
-            // out-of-memory _or_ an abandoned page with free blocks was reclaimed, try once again
-            Self::find_free(queue, heap, false)
+            current
         } else {
-            page
-        }
+            Heap::collect_retired(heap, false); // perhaps make a page available
+            let page = Page::fresh(heap, queue);
+            if page.is_none() && first_try {
+                // out-of-memory _or_ an abandoned page with free blocks was reclaimed, try once again
+                Self::find_free(queue, heap, false)
+            } else {
+                page
+            }
+        };
+        result.inspect(|page| internal_assert!(page.immediately_available()));
+        result
     }
 }
 
 bitflags! {
-    #[derive( Clone, Copy, PartialEq, Eq, Debug)]
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct PageFlags: u8 {
         const IN_FULL = 1;
         const HAS_ALIGNED = 1 << 1;
@@ -471,6 +482,7 @@ impl Page {
     // as long as the reset delay is under (2^30 - 1) milliseconds (~12 days)
     #[inline]
     pub fn purge_set_expire(&self) {
+        // V
         internal_assert!(self.used.get() == 0);
         internal_assert!(OPTION_PURGE_DELAY > 0);
         self.used.set(
@@ -482,6 +494,7 @@ impl Page {
 
     #[inline]
     pub fn purge_is_expired(&self, now: Option<u64>) -> bool {
+        // V
         let expire = self.used.get() as i32;
         // Assume the page expired if we couldn't get the current time
         now.map(|now| now as i32 - expire >= 0).unwrap_or(true)
@@ -489,6 +502,7 @@ impl Page {
 
     #[inline]
     pub unsafe fn purge_remove(page: Whole<Page>, data: &mut SegmentThreadData) {
+        // V
         if data.pages_purge.may_contain(page, Page::node) {
             internal_assert!(!page.segment_in_use.get());
             page.used.set(0);
@@ -520,7 +534,7 @@ impl Page {
         });
     }
 
-    /// This cannot use `&self` as we'd can't recover *mut Segment from it.
+    /// This cannot use `&self` as we'd can't recover `Whole<Segment>` from it.
     #[inline]
     pub unsafe fn segment(page: Whole<Page>) -> Whole<Segment> {
         // V
@@ -535,8 +549,10 @@ impl Page {
     }
 
     // Quick page start for initialized pages
+    // Start of the page available memory; can be used on uninitialized pages (only `segment_idx` must be set)
     #[inline]
     pub unsafe fn start(page: Whole<Page>, segment: Whole<Segment>) -> (Whole<u8>, usize) {
+        // V
         let bsize = page.xblock_size.get() as usize;
         internal_assert!(bsize > 0 && (bsize % WORD_SIZE) == 0);
         Segment::page_start(segment, page, bsize, &mut 0)
@@ -567,6 +583,7 @@ impl Page {
 
     #[inline]
     pub fn set_heap(&self, heap: Option<Ptr<Heap>>) {
+        // V
         internal_assert!(self.thread_free_flag() != DelayedMode::DelayedFreeing);
         self.heap
             .store(Ptr::as_maybe_null_ptr(heap), Ordering::Release)
@@ -578,6 +595,7 @@ impl Page {
         segment: Whole<Segment>,
         ptr: Whole<AllocatedBlock>,
     ) -> Whole<FreeBlock> {
+        // V
         internal_assert!(segment.page_kind <= PageKind::Large);
         // This relies on the fact that allocation happens on multiplies of block size
         // from the page start.
@@ -605,6 +623,7 @@ impl Page {
 
     // Get the block size of a page (special case for huge objects)
     pub unsafe fn actual_block_size(page: Whole<Page>) -> usize {
+        // V
         let bsize = page.xblock_size.get();
         internal_assert!(bsize > 0);
         if likely(bsize <= LARGE_OBJ_SIZE_MAX as u32) {
@@ -622,6 +641,7 @@ impl Page {
     // are there any available blocks?
     #[inline]
     pub unsafe fn any_available(&self) -> bool {
+        // V
         internal_assert!(self.reserved.get() > 0);
         self.used.get() < self.reserved.get() as u32
             || !DelayedFree::block(self.remote_free_blocks.load(Ordering::Relaxed)).is_null()
@@ -639,7 +659,8 @@ impl Page {
     // trigger this due to freeing everything and then
     // allocating again so careful when changing this.
     pub unsafe fn retire(page: Whole<Page>) {
-        //  mi_assert_expensive(_mi_page_is_valid(page));
+        // V
+        Page::validate(page);
         internal_assert!(page.all_free());
 
         (*page).remove_flags(PageFlags::HAS_ALIGNED);
@@ -662,7 +683,7 @@ impl Page {
                         RETIRE_CYCLES / 4
                     });
                 let heap = (*page).local_heap();
-                internal_assert!(queue.as_ptr().cast_const() >= heap.page_queues.as_ptr());
+                internal_assert!(Heap::contains_queue(heap, queue));
                 let index = queue.as_ptr().offset_from(heap.page_queues.as_ptr()) as usize;
                 internal_assert!(index < BINS);
                 if index < heap.page_retired_min.get() {
@@ -689,7 +710,7 @@ impl Page {
         internal_assert!(page.capacity.get() <= page.reserved.get());
 
         let segment = Page::segment(page);
-        let _ = Page::page_start(page, segment);
+        let _ = Page::start(page, segment);
         //internal_assert!(start + page.capacity*page.block_size == page.top);
 
         page.free_blocks.validate(page);
@@ -746,16 +767,22 @@ impl Page {
     }
 
     pub unsafe fn free(page: Whole<Page>, queue: Ptr<PageQueue>, force: bool) {
+        // V
+        Page::validate(page);
+        internal_assert!(queue == PageQueue::from_page(page));
+        internal_assert!(page.all_free());
+        internal_assert!(page.thread_free_flag() != DelayedMode::DelayedFreeing);
+
         // no more aligned blocks in here
         (*page).remove_flags(PageFlags::HAS_ALIGNED);
 
         // remove from the page list
         // (no need to do _mi_heap_delayed_free first as all blocks are already free)
         let heap = page.local_heap();
-        let segment_data = &mut heap.thread_data().segment;
         PageQueue::remove(queue, page);
 
         // and free it
+        let segment_data = &mut heap.thread_data().segment;
         (*page).set_heap(None);
         Segment::page_free(page, force, segment_data);
     }
@@ -765,6 +792,7 @@ impl Page {
     // moving to the full list in `mi_page_collect_ex` and we need to
     // ensure that there was no race where the page became unfull just before the move.
     unsafe fn thread_free_collect(page: Whole<Page>) {
+        // V
         let mut head;
         let mut tfree = page.remote_free_blocks.load(Ordering::Relaxed);
         loop {
@@ -813,6 +841,7 @@ impl Page {
     }
 
     pub unsafe fn free_collect(page: Whole<Page>, force: bool) {
+        // V
         // collect the thread free list
         if force || !DelayedFree::block(page.remote_free_blocks.load(Ordering::Relaxed)).is_null() {
             // quick test to avoid an atomic operation
@@ -844,6 +873,7 @@ impl Page {
 
     // return true if successful
     pub unsafe fn free_delayed_block(block: Whole<FreeBlock>) -> bool {
+        // V
         // get segment and page
         let segment = Segment::from_pointer(block.cast());
         internal_assert!(thread_id() == segment.thread_id.load(Ordering::Relaxed));
@@ -882,6 +912,7 @@ impl Page {
         delay: DelayedMode,
         override_never: bool,
     ) -> bool {
+        // V
         let mut tfree;
         let mut yield_count = 0;
         loop {
@@ -913,6 +944,7 @@ impl Page {
 
     #[inline]
     pub unsafe fn free_non_local_block(page: Whole<Page>, block: Whole<FreeBlock>) {
+        // V
         // first see if the segment was abandoned and we can reclaim it
         let segment = Page::segment(page);
         /*
@@ -993,6 +1025,7 @@ impl Page {
 
     #[inline]
     pub unsafe fn free_block(page: Whole<Page>, local: bool, block: Whole<FreeBlock>) {
+        // V
         // and push it on the free list
         if likely(local) {
             page.local_deferred_free_blocks.push_front(block);
@@ -1012,7 +1045,9 @@ impl Page {
     // the `page->heap->thread_delayed_free` into this page.
     // Currently only called through `Heap::collect` which ensures this.
     pub unsafe fn abandon(page: Whole<Page>, queue: Ptr<PageQueue>) {
-        // mi_assert_expensive(_mi_page_is_valid(page));
+        // V
+        Page::validate(page);
+        internal_assert!(queue == PageQueue::from_page(page));
 
         let heap = (*page).local_heap();
 
@@ -1040,18 +1075,20 @@ impl Page {
     /// called from segments when reclaiming abandoned pages
     #[inline]
     pub unsafe fn reclaim(page: Whole<Page>, heap: Ptr<Heap>) {
-        // mi_assert_expensive(mi_page_is_valid_init(page));
+        // V
+        Page::validate_init(page);
         page.assert_heap(Some(heap));
         internal_assert!(page.thread_free_flag() != DelayedMode::NeverDelayedFree);
 
         // TODO: push on full queue immediately if it is full?
         let queue = Heap::page_queue_for_size(heap, Page::actual_block_size(page));
         PageQueue::add(queue, page, heap);
-        //  mi_assert_expensive(_mi_page_is_valid(page));
+        Page::validate(page);
     }
 
     #[inline]
     pub unsafe fn to_full(page: Whole<Page>, queue: Ptr<PageQueue>) {
+        // V
         internal_assert!(queue == PageQueue::from_page(page));
         internal_assert!(!page.immediately_available());
         internal_assert!(!(*page).flags().contains(PageFlags::IN_FULL));
@@ -1067,7 +1104,8 @@ impl Page {
     // Move a page from the full list back to a regular list
     #[inline]
     pub unsafe fn unfull(page: Whole<Page>) {
-        // mi_assert_expensive(_mi_page_is_valid(page));
+        // V
+        Page::validate(page);
         internal_assert!((*page).flags().contains(PageFlags::IN_FULL));
 
         // Seems redundant:
@@ -1086,12 +1124,8 @@ impl Page {
         PageQueue::enqueue_from(queue, pqfull, page);
     }
 
-    // Start of the page available memory; can be used on uninitialized pages (only `segment_idx` must be set)
-    unsafe fn page_start(page: Whole<Page>, segment: Whole<Segment>) -> (Whole<u8>, usize) {
-        Segment::page_start(segment, page, page.xblock_size.get() as usize, &mut 0)
-    }
-
     unsafe fn init(page: Whole<Page>, heap: Ptr<Heap>, block_size: usize) {
+        // V
         let segment = Page::segment(page);
         internal_assert!(block_size > 0);
         // set fields
@@ -1116,16 +1150,16 @@ impl Page {
         internal_assert!(page.capacity.get() == 0);
         internal_assert!(page.free_blocks.is_empty());
         internal_assert!(page.used.get() == 0);
-        //  internal_assert!((*page).xthread_free == 0);
+        internal_assert!((*page).remote_free_blocks.load(Ordering::Relaxed) == null_mut());
         internal_assert!(page.node.next.get().is_none());
         internal_assert!(page.node.prev.get().is_none());
         internal_assert!(page.retire_expire.get() == 0);
         internal_assert!(!(*page).flags().contains(PageFlags::HAS_ALIGNED));
-        //mi_assert_expensive(mi_page_is_valid_init(page));
+        Page::validate_init(page);
 
         // initialize an initial free list
         Page::extend_free(page);
-        //mi_assert(mi_page_immediate_available(page));
+        internal_assert!(page.immediately_available());
     }
 
     // allocate a fresh page from a segment
@@ -1135,7 +1169,8 @@ impl Page {
         block_size: usize,
         page_alignment: usize,
     ) -> Option<Whole<Page>> {
-        //  internal_assert!(mi_heap_contains_queue(heap, queue));
+        // V
+        internal_assert!(Heap::contains_queue(heap, queue));
         internal_assert!(
             page_alignment > 0 || block_size > LARGE_OBJ_SIZE_MAX || block_size == queue.block_size
         );
@@ -1162,13 +1197,13 @@ impl Page {
 
         PageQueue::add(queue, page, heap);
 
-        //  mi_assert_expensive(_mi_page_is_valid(page));
+        Page::validate(page);
         Some(page)
     }
 
     // Get a fresh page to use
     unsafe fn fresh(heap: Ptr<Heap>, queue: Ptr<PageQueue>) -> Option<Whole<Page>> {
-        // internal_assert!(mi_heap_contains_queue(heap, pq));
+        internal_assert!(Heap::contains_queue(heap, queue));
         let page = Page::fresh_alloc(heap, queue, queue.block_size, 0)?;
 
         internal_assert!(queue.block_size == Page::actual_block_size(page));
@@ -1208,7 +1243,13 @@ impl Page {
     }
 
     unsafe fn free_list_extend(page: Whole<Page>, bsize: usize, extend: usize) {
-        let (page_area, _) = Page::page_start(page, Page::segment(page));
+        // V
+        //internal_assert!(page.free_blocks.is_empty());
+        //internal_assert!(page.local_deferred_free_blocks.is_empty());
+        internal_assert!(page.capacity.get() as usize + extend <= page.reserved.get() as usize);
+        internal_assert!(bsize == Page::actual_block_size(page));
+
+        let (page_area, _) = Page::start(page, Page::segment(page));
 
         let start = Page::block_at(page, page_area, bsize, page.capacity.get() as usize);
 
@@ -1231,7 +1272,7 @@ impl Page {
 
     /*
     unsafe fn free_list_extend_secure(page: *mut Page, heap: Ptr<Heap>,   bsize: usize,  extend: usize,) {
-        let (page_area, _) = Page::page_start(page, Page::segment(page));
+        let (page_area, _) = Page::start(page, Page::segment(page));
 
         // initialize a randomized free list
         // set up `slice_count` slices to alternate between
@@ -1287,19 +1328,18 @@ impl Page {
     // allocations but this did not speed up any benchmark (due to an
     // extra test in malloc? or cache effects?)
     pub unsafe fn extend_free(page: Whole<Page>) {
+        // V
+        Page::validate_init(page);
+
         if page.capacity >= page.reserved {
             return;
         }
 
-        let (_, page_size) = Page::page_start(page, Page::segment(page));
-
         // calculate the extend count
-        let bsize = if page.xblock_size.get() as usize <= LARGE_OBJ_SIZE_MAX {
-            page.xblock_size.get() as usize
-        } else {
-            page_size
-        };
+        let bsize = Page::actual_block_size(page);
+
         let mut extend = (page.reserved.get() - page.capacity.get()) as usize;
+        internal_assert!(extend > 0);
 
         let mut max_extend = if bsize >= MAX_EXTEND_SIZE {
             MIN_EXTEND
@@ -1311,21 +1351,23 @@ impl Page {
         if max_extend < MIN_EXTEND {
             max_extend = MIN_EXTEND;
         }
+        internal_assert!(max_extend > 0);
 
         if extend > max_extend {
             // ensure we don't touch memory beyond the page to reduce page commit.
             // the `lean` benchmark tests this. Going from 1 to 8 increases rss by 50%.
             extend = max_extend;
         }
+        internal_assert!(extend > 0);
+
+        internal_assert!(extend + (page.capacity.get() as usize) <= (page.reserved.get() as usize));
+        internal_assert!(extend <= u16::MAX as usize);
 
         // and append the extend the free list
-        // if extend < MIN_SLICES {
         Page::free_list_extend(page, bsize, extend);
-        // } else {
-        // TODO: Do we need the secure variant?
-        //     page_free_list_extend_secure(heap, page, bsize, extend);
-        //  }
+
         // enable the new free list
         page.capacity.set(page.capacity.get() + extend as u16);
+        Page::validate_init(page);
     }
 }
