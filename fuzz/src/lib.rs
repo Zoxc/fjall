@@ -82,19 +82,19 @@ pub enum Operation {
 }
 
 impl Operation {
-    fn valid(&self, limit: usize) -> bool {
+    fn valid(&self, filter: impl Fn(Layout) -> bool) -> bool {
         match self {
             Operation::Alloc { index: _, layout } => {
-                if layout.size > limit || layout.align > limit {
-                    return false;
-                }
                 let Some(total) = layout.size.checked_add(layout.align) else {
                     return false;
                 };
                 if !layout.valid() || layout.align > SEGMENT_SIZE || total > MAX_HEAP_SIZE {
                     return false;
                 }
-                Layout::from_size_align(layout.size, layout.align).is_ok()
+                let Ok(layout) = Layout::from_size_align(layout.size, layout.align) else {
+                    return false;
+                };
+                filter(layout)
             }
             Operation::Dealloc { .. } => true,
         }
@@ -105,8 +105,8 @@ pub const SEGMENT_SIZE: usize = 1 << 21;
 
 pub const MAX_HEAP_SIZE: usize = 4 * 1024 * 1024 * 1024;
 
-pub fn run(methods: Vec<Operation>, limit: usize) -> Corpus {
-    if !methods.iter().all(|o| o.valid(limit)) {
+pub fn run(methods: Vec<Operation>, filter: impl Fn(Layout) -> bool) -> Corpus {
+    if !methods.iter().all(|o| o.valid(&filter)) {
         return Corpus::Reject;
     }
 

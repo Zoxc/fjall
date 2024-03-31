@@ -47,6 +47,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_rust_api_huge"
+path = "fuzz_targets/rust_api_huge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_range_overlap"
 path = "fuzz_targets/range_overlap.rs"
 test = false
