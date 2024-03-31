@@ -526,7 +526,7 @@ pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
 unsafe impl GlobalAlloc for Alloc {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if layout.size() <= LARGE_OBJ_SIZE_MAX && layout.align() <= WORD_SIZE {
+        if layout.size() > LARGE_OBJ_SIZE_MAX && layout.align() <= WORD_SIZE {
             abort_on_panic(|| alloc(layout))
         } else {
             System.alloc(layout)
@@ -535,7 +535,7 @@ unsafe impl GlobalAlloc for Alloc {
 
     #[inline]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if layout.size() <= LARGE_OBJ_SIZE_MAX && layout.align() <= WORD_SIZE {
+        if layout.size() > LARGE_OBJ_SIZE_MAX && layout.align() <= WORD_SIZE {
             abort_on_panic(|| dealloc(ptr, layout));
         } else {
             System.dealloc(ptr, layout)
