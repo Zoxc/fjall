@@ -1,4 +1,4 @@
-#![feature(core_intrinsics, const_refs_to_static, lazy_cell)]
+#![feature(core_intrinsics, const_refs_to_static)]
 #![allow(
     unstable_name_collisions,
     internal_features,

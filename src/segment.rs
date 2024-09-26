@@ -592,19 +592,15 @@ impl Segment {
     ) -> Option<Whole<Segment>> {
         // V
 
-        // FIXME
-        internal_assert_or_abort!(page_alignment <= SEGMENT_ALIGN);
-
-        // required is only > 0 for huge page allocations
-        internal_assert!(
-            (required > 0 && page_kind > PageKind::Large)
-                || (required == 0 && page_kind <= PageKind::Large)
-        );
+        if page_alignment > SEGMENT_ALIGN {
+            // `Segment::from_pointer` relies on segments being aligned to `SEGMENT_ALIGN`.
+            return None;
+        }
 
         // calculate needed sizes first
         let capacity;
         if page_kind == PageKind::Huge {
-            internal_assert!(page_shift == SEGMENT_SHIFT + 1 && required > 0);
+            internal_assert!(page_shift == SEGMENT_SHIFT + 1 && required > 0 && page_alignment > 0);
             capacity = 1;
         } else {
             internal_assert!(required == 0 && page_alignment == 0);
@@ -614,8 +610,12 @@ impl Segment {
             internal_assert!((1..=SMALL_PAGES_PER_SEGMENT).contains(&capacity));
         }
         let mut metadata_size = 0;
-        let layout =
-            Segment::calculate_sizes(capacity, required, &mut metadata_size, page_alignment)?;
+        let layout = Segment::calculate_sizes(
+            capacity,
+            required,
+            &mut metadata_size,
+            page_alignment.max(1),
+        )?;
         internal_assert!(layout.size() - metadata_size >= required);
 
         let commit = OPTION_EAGER_COMMIT ||
@@ -1016,8 +1016,6 @@ impl Segment {
             (fully_committed && committed_size == segment_size)
                 || (!fully_committed && committed_size < segment_size)
         );
-
-        //  _mi_abandoned_await_readers(); // prevent ABA issue if concurrent readers try to access our memory (that might be purged)
 
         //  _mi_arena_free(segment, segment_size, committed_size, segment->memid, tld->stats);
 
