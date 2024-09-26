@@ -57,14 +57,17 @@ fuzz_target!(|methods: [Vec<Operation>; THREADS]| {
                         if *heap_size + fit <= MAX_LOCAL_HEAP_SIZE {
                             break;
                         }
-                        {
+
+                        if allocs.len() > 0 {
                             let alloc = allocs.swap_remove(index % allocs.len());
                             *heap_size -= alloc.cost();
                         }
+
                         if *heap_size + fit <= MAX_LOCAL_HEAP_SIZE {
                             break;
                         }
-                        {
+
+                        if sent_allocs.len() > 0 {
                             let alloc = sent_allocs.swap_remove(index % sent_allocs.len());
                             *heap_size -= alloc.cost();
                         }
