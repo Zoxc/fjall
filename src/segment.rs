@@ -1100,6 +1100,8 @@ impl Segment {
 
         // all pages in the segment are abandoned; add it to the abandoned list
 
+        data.remove_segment();
+
         //  mi_segments_track_size(-((long)segment.segment_size), data);
 
         segment.abandoned_visits.set(0);
