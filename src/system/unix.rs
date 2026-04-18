@@ -102,7 +102,8 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
         if result.is_null() || aligned.addr().checked_add(layout.size()).is_none() {
             // Either 0 or the last byte of the address space was allocated, so we can't use
             // this memory.
-            dealloc(alloc, Ptr::new_unchecked(aligned), layout);
+            let result = libc::munmap(alloc.base, size);
+            internal_assert!(result == 0);
             return None;
         }
 
