@@ -385,7 +385,7 @@ struct AbortOnPanic;
 impl Drop for AbortOnPanic {
     #[inline]
     fn drop(&mut self) {
-        panic!("panic in allocator");
+        internal_abort!("panic in allocator");
     }
 }
 
