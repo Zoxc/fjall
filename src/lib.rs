@@ -231,7 +231,7 @@ const fn div(lhs: usize, rhs: NonZeroUsize) -> usize {
 
 #[allow(unused)]
 fn overlaps(a: Range<usize>, b: Range<usize>) -> bool {
-    if a.start <= a.end || b.start <= b.end {
+    if a.start >= a.end || b.start >= b.end {
         return false;
     };
     max(a.start, b.start) <= min(a.end - 1, b.end - 1)
