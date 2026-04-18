@@ -252,7 +252,7 @@ impl Heap {
     ) -> bool {
         // V
         if heap.page_count.get() == 0 {
-            return false;
+            return true;
         }
 
         // visit all pages
