@@ -11,4 +11,4 @@ panic-check = []
 
 [dependencies]
 fjall = { path = ".." }
-no-panic = "0.1.29"
+no-panic = "0.1.36"

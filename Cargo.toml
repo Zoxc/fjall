@@ -12,7 +12,7 @@ edition = "2021"
 license = "MIT"
 
 [dependencies]
-bitflags = "2.4.2"
+bitflags = "2.11.1"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies.windows-sys]
