@@ -13,6 +13,13 @@ use std::{
 };
 
 #[inline]
+unsafe fn alloc_layout(layout: Layout) -> *mut c_void {
+    let result = with_heap(|heap| Whole::as_maybe_null_ptr(alloc_padded_end(heap, layout)));
+    validate_align(result, layout.align());
+    result.cast()
+}
+
+#[inline]
 pub extern "C" fn malloc(size: usize) -> *mut c_void {
     aligned_alloc(WORD_SIZE, size)
 }
@@ -46,8 +53,11 @@ pub unsafe extern "C" fn posix_memalign(ptr: *mut *mut c_void, align: usize, siz
     if ptr.is_null() {
         return EINVAL;
     }
-    internal_assert!(align % mem::size_of::<*mut ()>() == 0);
-    internal_assert!(align.is_power_of_two());
+
+    if !align.is_power_of_two() || align % mem::size_of::<*mut ()>() != 0 {
+        return EINVAL;
+    }
+
     let result = aligned_alloc(align, size);
     if result.is_null() {
         ENOMEM
@@ -60,19 +70,17 @@ pub unsafe extern "C" fn posix_memalign(ptr: *mut *mut c_void, align: usize, siz
 #[inline]
 pub extern "C" fn aligned_alloc(align: usize, size: usize) -> *mut c_void {
     unsafe {
-        internal_assert!(align.is_power_of_two());
+        if !align.is_power_of_two() {
+            return null_mut();
+        }
 
         let size = max(size, 1);
         let align = max(align, WORD_SIZE);
+        let Ok(layout) = Layout::from_size_align(size, align) else {
+            return null_mut();
+        };
 
-        let result = with_heap(|heap| {
-            Whole::as_maybe_null_ptr(alloc_padded_end(
-                heap,
-                Layout::from_size_align_unchecked(size, align),
-            ))
-        });
-        validate_align(result, align);
-        result.cast()
+        alloc_layout(layout)
     }
 }
 
