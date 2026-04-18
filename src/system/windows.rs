@@ -25,7 +25,7 @@ use {
 
 // Use the `.CRT$XLM` section as that us executed
 // later then the `.CRT$XLB` section used by `std`.
-#[link_section = ".CRT$XLM"]
+#[unsafe(link_section = ".CRT$XLM")]
 #[used]
 static THREAD_CALLBACK: unsafe extern "system" fn(*mut (), u32, *mut ()) = callback;
 

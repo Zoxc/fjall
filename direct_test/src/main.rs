@@ -24,7 +24,7 @@ impl Allocation {
             let size: usize = rng.gen_range(1..SIZE);
             let layout = Layout::from_size_align(size as usize, 4).unwrap();
             let ptr = alloc(layout);
-            let seed: u8 = rng.gen();
+            let seed: u8 = rng.r#gen();
             if !ptr.is_null() {
                 slice::from_raw_parts_mut(ptr, size).fill(seed);
             }
@@ -118,7 +118,7 @@ fn main() {
                     let mut allocs = Vec::new();
 
                     for _ in 0..(10 * MIRI_FACTOR) {
-                        if rng.gen() {
+                        if rng.r#gen() {
                             allocs.push(Allocation::new());
                         }
 
@@ -130,7 +130,7 @@ fn main() {
 
                         yield_now();
 
-                        if rng.gen() && allocs.len() > 50 {
+                        if rng.r#gen() && allocs.len() > 50 {
                             allocs.remove(rng.gen_range(0..allocs.len()));
                         }
                     }

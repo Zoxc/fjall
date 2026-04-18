@@ -5,7 +5,7 @@ use libfuzzer_sys::Corpus;
 use std::alloc::Layout;
 use std::sync::atomic::AtomicPtr;
 
-extern "C" {
+unsafe extern "C" {
     pub fn __asan_poison_memory_region(addr: *mut u8, size: usize);
     pub fn __asan_unpoison_memory_region(addr: *mut u8, size: usize);
 }

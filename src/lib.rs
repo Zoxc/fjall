@@ -1,5 +1,6 @@
-#![feature(core_intrinsics, const_refs_to_static)]
+#![feature(core_intrinsics)]
 #![allow(
+    unsafe_op_in_unsafe_fn,
     unstable_name_collisions,
     internal_features,
     clippy::missing_safety_doc,
