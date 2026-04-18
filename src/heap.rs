@@ -7,7 +7,6 @@ use crate::{
     SMALL_ALLOC_WORDS, SMALL_SIZE_MAX, WORD_SIZE,
 };
 use core::{alloc::Layout, intrinsics::unlikely, ptr::null_mut};
-use sptr::Strict;
 use std::cell::{Cell, UnsafeCell};
 use std::intrinsics::likely;
 use std::sync::atomic::{AtomicPtr, Ordering};

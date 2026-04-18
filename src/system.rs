@@ -3,7 +3,6 @@ use crate::{
     segment::{OPTION_PURGE_DELAY, OPTION_PURGE_DOES_DECOMMIT},
     Ptr,
 };
-use sptr::Strict;
 
 #[cfg(windows)]
 mod windows;

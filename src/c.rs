@@ -3,7 +3,6 @@ use crate::{
     PADDING, WORD_SIZE,
 };
 use libc::{EINVAL, ENOMEM};
-use sptr::Strict;
 use std::{
     alloc::Layout,
     cmp::{self, max},

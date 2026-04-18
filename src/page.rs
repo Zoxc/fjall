@@ -13,7 +13,6 @@ use crate::{
 use bitflags::bitflags;
 use core::intrinsics::likely;
 use core::{alloc::Layout, ptr::null_mut};
-use sptr::Strict;
 use std::cell::Cell;
 use std::intrinsics::unlikely;
 use std::num::NonZeroUsize;

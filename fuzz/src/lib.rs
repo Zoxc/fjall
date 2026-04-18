@@ -2,7 +2,6 @@
 
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
 use libfuzzer_sys::Corpus;
-use sptr::Strict;
 use std::alloc::Layout;
 use std::sync::atomic::AtomicPtr;
 

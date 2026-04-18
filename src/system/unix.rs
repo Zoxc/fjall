@@ -8,7 +8,6 @@ use libc::c_void;
 use libc::{
     MADV_DONTNEED, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE,
 };
-use sptr::Strict;
 #[cfg(not(feature = "system-allocator"))]
 use std::alloc::Layout;
 use std::ptr::null_mut;

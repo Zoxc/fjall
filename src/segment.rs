@@ -15,7 +15,6 @@ use crate::{
     SMALL_OBJ_SIZE_MAX,
 };
 use core::alloc::Layout;
-use sptr::Strict;
 use std::cell::Cell;
 use std::cmp::max;
 use std::intrinsics::unlikely;

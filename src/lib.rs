@@ -19,7 +19,6 @@ use core::{
 use page::AllocatedBlock;
 #[cfg(debug_assertions)]
 use segment::cookie;
-use sptr::Strict;
 use std::alloc::System;
 use std::cell::Cell;
 use std::cmp::max;

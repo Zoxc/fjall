@@ -7,7 +7,6 @@ use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_DETACH, DLL_THREAD_
 use {
     crate::Ptr,
     crate::{align_up, system, validate_align},
-    sptr::Strict,
     std::alloc::Layout,
     std::cmp::min,
     std::os::raw::c_void,
