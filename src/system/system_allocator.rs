@@ -14,7 +14,7 @@ pub unsafe fn commit(_ptr: Ptr<u8>, _size: usize) -> bool {
 }
 
 pub unsafe fn decommit(_ptr: Ptr<u8>, _size: usize) -> bool {
-    true
+    false
 }
 
 pub fn alloc(layout: Layout, _commit: bool) -> Option<(SystemAllocation, Ptr<u8>, bool)> {
