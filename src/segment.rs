@@ -438,7 +438,6 @@ impl Segment {
     ) -> Option<Whole<Segment>> {
         // V
         internal_assert!(requested_block_size <= LARGE_OBJ_SIZE_MAX);
-        internal_assert!(segment.page_kind <= PageKind::Large);
 
         *right_page_reclaimed = false;
 
