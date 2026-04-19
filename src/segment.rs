@@ -71,9 +71,7 @@ pub struct SegmentThreadData {
     small_free: List<Whole<Segment>>, // queue of segments with free small pages
     medium_free: List<Whole<Segment>>, // queue of segments with free medium pages
     pub pages_purge: List<Whole<Page>>, // queue of freed pages that are delay purged
-    current_count: usize,             // current number of segments;
     count: usize,                     // total number of segments allocated,
-    reclaim_count: usize,             // number of reclaimed (abandoned) segments
 }
 
 impl SegmentThreadData {
@@ -90,12 +88,7 @@ impl SegmentThreadData {
     }
 
     fn add_segment(&mut self) {
-        self.current_count += 1;
         self.count = self.count.saturating_add(1);
-    }
-
-    fn remove_segment(&mut self) {
-        self.current_count -= 1;
     }
 }
 
@@ -105,9 +98,7 @@ impl SegmentThreadData {
             small_free: List::empty(),
             medium_free: List::empty(),
             pages_purge: List::empty(), // queue of freed pages that are delay purged
-            current_count: 0,           // current number of segments;
             count: 0,
-            reclaim_count: 0, // number of reclaimed (abandoned) segments
         }
     }
 }
@@ -444,7 +435,6 @@ impl Segment {
         segment.thread_id.store(thread_id(), Ordering::Release);
         segment.abandoned_visits.set(0);
         segment.was_reclaimed.set(true);
-        data.reclaim_count += 1; // FIXME: Can this overflow?
         data.add_segment();
         internal_assert!(!segment.node.used());
         Segment::validate(segment, data);
@@ -984,18 +974,14 @@ impl Segment {
         page.reserved.set(0);
     }
 
-    unsafe fn os_free(segment: Whole<Segment>, segment_size: usize, data: &mut SegmentThreadData) {
+    unsafe fn os_free(segment: Whole<Segment>, segment_size: usize) {
         // V
 
         // FIXME: Why are we changing `Segment` in this function?
 
         segment.thread_id.store(0, Ordering::Relaxed);
 
-        // FIXME: Is this segment always local?
-        data.remove_segment();
-
         if segment.was_reclaimed.get() {
-            data.reclaim_count -= 1;
             segment.was_reclaimed.set(false);
         }
 
@@ -1054,7 +1040,7 @@ impl Segment {
         expensive_assert!(!(data.medium_free.contains(segment, Segment::node)));
         internal_assert!(!segment.node.used());
         // return it to the OS
-        Segment::os_free(segment, segment.segment_size, data);
+        Segment::os_free(segment, segment.segment_size);
     }
 
     // remove from free queue if it is in one
@@ -1100,13 +1086,10 @@ impl Segment {
 
         // all pages in the segment are abandoned; add it to the abandoned list
 
-        data.remove_segment();
-
         //  mi_segments_track_size(-((long)segment.segment_size), data);
 
         segment.abandoned_visits.set(0);
         if segment.was_reclaimed.get() {
-            data.reclaim_count -= 1;
             segment.was_reclaimed.set(false);
         }
         Segment::mark_abandoned(segment);
