@@ -37,7 +37,7 @@ use std::thread_local;
 #[allow(unused)]
 macro_rules! internal_abort {
     () => (
-        abort!("explicit abort");
+        internal_abort!("explicit abort");
     );
     ($($arg:tt)+) => ({
         crate::abort_fmt(format_args!($($arg)+));
