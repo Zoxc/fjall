@@ -28,7 +28,12 @@ unsafe fn page_align_conservative(ptr: *mut u8, size: usize) -> (*mut u8, usize)
     let page_size = page_size();
     let end = ptr.add(size).map_addr(|addr| align_down(addr, page_size));
     let ptr = ptr.map_addr(|addr| align_up(addr, page_size));
-    (ptr, end.offset_from(ptr) as usize)
+
+    if ptr.addr() >= end.addr() {
+        (ptr, 0)
+    } else {
+        (ptr, end.offset_from(ptr) as usize)
+    }
 }
 
 // either resets or decommits memory, returns true if the memory needs
