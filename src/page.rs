@@ -85,6 +85,7 @@ impl BlockList {
         }
     }
 
+    // Corresponds to mimalloc `mi_page_list_is_valid` in src/page.c.
     #[inline]
     pub unsafe fn validate(&self, page: Whole<Page>) {
         if !cfg!(debug_assertions) {
@@ -101,6 +102,7 @@ impl BlockList {
         }
     }
 
+    // Corresponds to mimalloc `mi_page_list_count` in src/page.c.
     #[inline]
     pub unsafe fn count(&self) -> usize {
         self.iter().count()
@@ -174,21 +176,25 @@ impl PageQueue {
         }
     }
 
+    // Corresponds to mimalloc `mi_page_queue_is_huge` in src/page-queue.c.
     #[inline]
     pub unsafe fn is_huge(&self) -> bool {
         self.block_size == BIN_HUGE_BLOCK_SIZE
     }
 
+    // Corresponds to mimalloc `mi_page_queue_is_full` in src/page-queue.c.
     #[inline]
     unsafe fn is_full(&self) -> bool {
         self.block_size == BIN_FULL_BLOCK_SIZE
     }
 
+    // Corresponds to mimalloc `mi_page_queue_is_special` in src/page-queue.c.
     #[inline]
     unsafe fn is_special(&self) -> bool {
         self.block_size > LARGE_OBJ_SIZE_MAX
     }
 
+    // Corresponds to mimalloc `mi_page_queue_push` in src/page-queue.c.
     unsafe fn add(queue: Ptr<PageQueue>, page: Whole<Page>, heap: Ptr<Heap>) {
         // V
         (*page).assert_heap(Some(heap));
@@ -210,6 +216,7 @@ impl PageQueue {
         heap.page_count.set(heap.page_count.get() + 1);
     }
 
+    // Corresponds to mimalloc `mi_page_queue_remove` in src/page-queue.c.
     unsafe fn remove(queue: Ptr<PageQueue>, page: Whole<Page>) {
         // V
         internal_assert!(((page.block_size()) == BIN_HUGE_BLOCK_SIZE) == (*queue).is_huge());
@@ -233,6 +240,7 @@ impl PageQueue {
         (*page).remove_flags(PageFlags::IN_FULL);
     }
 
+    // Corresponds to mimalloc `mi_page_queue_enqueue_from` in src/page-queue.c.
     unsafe fn enqueue_from(to: Ptr<PageQueue>, from: Ptr<PageQueue>, page: Whole<Page>) {
         // V
         #[allow(clippy::nonminimal_bool)]
@@ -271,6 +279,7 @@ impl PageQueue {
         (*page).set_flags(PageFlags::IN_FULL, (*to).is_full());
     }
 
+    // Corresponds to mimalloc `mi_heap_page_queue_of` in src/page-queue.c.
     unsafe fn from_page_and_heap(page: Whole<Page>, heap: Ptr<Heap>) -> Ptr<PageQueue> {
         // V
         let bin = if (*page).flags().contains(PageFlags::IN_FULL) {
@@ -285,11 +294,13 @@ impl PageQueue {
         queue
     }
 
+    // Corresponds to mimalloc `mi_page_queue_of` in src/page-queue.c.
     unsafe fn from_page(page: Whole<Page>) -> Ptr<PageQueue> {
         Self::from_page_and_heap(page, (*page).local_heap())
     }
 
     /// Find a page with free blocks.
+    // Corresponds to mimalloc `mi_page_queue_find_free_ex` in src/page.c.
     #[inline]
     pub unsafe fn find_free(
         queue: Ptr<PageQueue>,
@@ -360,18 +371,22 @@ pub enum DelayedMode {
 pub struct DelayedFree;
 
 impl DelayedFree {
+    // Corresponds to mimalloc `mi_tf_make` in include/mimalloc/internal.h.
     fn new(block: *mut FreeBlock, mode: DelayedMode) -> *mut DelayedFree {
         block.map_addr(|addr| addr | (mode as usize)).cast()
     }
 
+    // Corresponds to mimalloc `mi_tf_set_delayed` in include/mimalloc/internal.h.
     fn change_mode(delayed: *mut DelayedFree, mode: DelayedMode) -> *mut DelayedFree {
         Self::new(Self::block(delayed), mode)
     }
 
+    // Corresponds to mimalloc `mi_tf_set_block` in include/mimalloc/internal.h.
     fn change_block(delayed: *mut DelayedFree, block: *mut FreeBlock) -> *mut DelayedFree {
         Self::new(block, Self::mode(delayed))
     }
 
+    // Corresponds to mimalloc `mi_tf_delayed` in include/mimalloc/internal.h.
     fn mode(delayed: *mut DelayedFree) -> DelayedMode {
         match delayed.addr() & 0x3 {
             0 => DelayedMode::UseDelayedFree,
@@ -382,6 +397,7 @@ impl DelayedFree {
         }
     }
 
+    // Corresponds to mimalloc `mi_tf_block` in include/mimalloc/internal.h.
     fn block(delayed: *mut DelayedFree) -> *mut FreeBlock {
         delayed.map_addr(|addr| addr & !0x3).cast()
     }
@@ -536,6 +552,7 @@ impl Page {
     }
 
     /// This cannot use `&self` as we'd can't recover `Whole<Segment>` from it.
+    // Corresponds to mimalloc `_mi_page_segment` in include/mimalloc/internal.h.
     #[inline]
     pub unsafe fn segment(page: Whole<Page>) -> Whole<Segment> {
         // V
@@ -551,6 +568,7 @@ impl Page {
 
     // Quick page start for initialized pages
     // Start of the page available memory; can be used on uninitialized pages (only `segment_idx` must be set)
+    // Corresponds to mimalloc `_mi_page_start` in include/mimalloc/internal.h.
     #[inline]
     pub unsafe fn start(page: Whole<Page>, segment: Whole<Segment>) -> (Whole<u8>, usize) {
         // V
@@ -564,6 +582,7 @@ impl Page {
         unsafe { internal_assert!(value == Ptr::new(self.heap.load(Ordering::Relaxed))) }
     }
 
+    // Corresponds to mimalloc `mi_page_heap` in include/mimalloc/internal.h.
     #[inline]
     pub unsafe fn local_heap(&self) -> Ptr<Heap> {
         let heap = unsafe { Ptr::new(self.heap.load(Ordering::Relaxed)) };
@@ -577,11 +596,13 @@ impl Page {
         heap.unwrap_unchecked()
     }
 
+    // Corresponds to mimalloc `mi_page_thread_free_flag` in include/mimalloc/internal.h.
     #[inline]
     pub fn thread_free_flag(&self) -> DelayedMode {
         DelayedFree::mode(self.remote_free_blocks.load(Ordering::Relaxed))
     }
 
+    // Corresponds to mimalloc `mi_page_set_heap` in include/mimalloc/internal.h.
     #[inline]
     pub fn set_heap(&self, heap: Option<Ptr<Heap>>) {
         // V
@@ -591,6 +612,7 @@ impl Page {
     }
 
     // Adjust a block that was allocated aligned, to the actual start of the block in the page.
+    // Corresponds to mimalloc `_mi_page_ptr_unalign` in src/alloc.c.
     pub unsafe fn unalign_pointer(
         page: Whole<Page>,
         segment: Whole<Segment>,
@@ -623,6 +645,7 @@ impl Page {
     }
 
     // Get the block size of a page (special case for huge objects)
+    // Corresponds to mimalloc `mi_page_block_size` in include/mimalloc/internal.h.
     pub unsafe fn actual_block_size(page: Whole<Page>) -> usize {
         // V
         let bsize = page.xblock_size.get();
@@ -634,12 +657,14 @@ impl Page {
         }
     }
 
+    // Corresponds to mimalloc `mi_page_immediate_available` in include/mimalloc/internal.h.
     #[inline]
     pub unsafe fn immediately_available(&self) -> bool {
         !self.free_blocks.is_empty()
     }
 
     // are there any available blocks?
+    // Corresponds to mimalloc `mi_page_has_any_available` in include/mimalloc/internal.h.
     #[inline]
     pub unsafe fn any_available(&self) -> bool {
         // V
@@ -648,6 +673,7 @@ impl Page {
             || !DelayedFree::block(self.remote_free_blocks.load(Ordering::Relaxed)).is_null()
     }
 
+    // Corresponds to mimalloc `mi_page_all_free` in include/mimalloc/internal.h.
     #[inline]
     pub unsafe fn all_free(&self) -> bool {
         self.used.get() == 0
@@ -659,6 +685,7 @@ impl Page {
     // Note: called from `mi_free` and benchmarks often
     // trigger this due to freeing everything and then
     // allocating again so careful when changing this.
+    // Corresponds to mimalloc `_mi_page_retire` in src/page.c.
     pub unsafe fn retire(page: Whole<Page>) {
         // V
         Page::validate(page);
@@ -701,6 +728,7 @@ impl Page {
         Page::free(page, queue, false);
     }
 
+    // Corresponds to mimalloc `mi_page_is_valid_init` in src/page.c.
     pub unsafe fn validate_init(page: Whole<Page>) {
         if !cfg!(debug_assertions) {
             return;
@@ -740,6 +768,7 @@ impl Page {
         internal_assert!(page.used.get() as usize + free_count == page.capacity.get() as usize);
     }
 
+    // Corresponds to mimalloc `_mi_page_is_valid` in src/page.c.
     pub unsafe fn validate(page: Whole<Page>) {
         if !cfg!(debug_assertions) {
             return;
@@ -767,6 +796,7 @@ impl Page {
         }
     }
 
+    // Corresponds to mimalloc `_mi_page_free` in src/page.c.
     pub unsafe fn free(page: Whole<Page>, queue: Ptr<PageQueue>, force: bool) {
         // V
         Page::validate(page);
@@ -792,6 +822,7 @@ impl Page {
     // Note: The exchange must be done atomically as this is used right after
     // moving to the full list in `mi_page_collect_ex` and we need to
     // ensure that there was no race where the page became unfull just before the move.
+    // Corresponds to mimalloc `_mi_page_thread_free_collect` in src/page.c.
     unsafe fn thread_free_collect(page: Whole<Page>) {
         // V
         let mut head;
@@ -841,6 +872,7 @@ impl Page {
         page.used.set(page.used.get() - count as u32);
     }
 
+    // Corresponds to mimalloc `_mi_page_free_collect` in src/page.c.
     pub unsafe fn free_collect(page: Whole<Page>, force: bool) {
         // V
         // collect the thread free list
@@ -873,6 +905,7 @@ impl Page {
     }
 
     // return true if successful
+    // Corresponds to mimalloc `_mi_free_delayed_block` in src/alloc.c.
     pub unsafe fn free_delayed_block(block: Whole<FreeBlock>) -> bool {
         // V
         // get segment and page
@@ -901,6 +934,7 @@ impl Page {
         true
     }
 
+    // Corresponds to mimalloc `_mi_page_use_delayed_free` in src/page.c.
     pub unsafe fn use_delayed_free(page: Whole<Page>, delay: DelayedMode, override_never: bool) {
         while !Page::try_use_delayed_free(page, delay, override_never) {
             // This ensures the value is set.
@@ -908,6 +942,7 @@ impl Page {
         }
     }
 
+    // Corresponds to mimalloc `_mi_page_try_use_delayed_free` in src/page.c.
     unsafe fn try_use_delayed_free(
         page: Whole<Page>,
         delay: DelayedMode,
@@ -943,6 +978,7 @@ impl Page {
         true // success
     }
 
+    // Corresponds to mimalloc `_mi_free_block_mt` in src/alloc.c.
     #[inline]
     pub unsafe fn free_non_local_block(page: Whole<Page>, block: Whole<FreeBlock>) {
         // V
@@ -1024,6 +1060,7 @@ impl Page {
         }
     }
 
+    // Corresponds to mimalloc `_mi_free_block` in src/alloc.c.
     #[inline]
     pub unsafe fn free_block(page: Whole<Page>, local: bool, block: Whole<FreeBlock>) {
         // V
@@ -1045,6 +1082,7 @@ impl Page {
     // Note: only call if it is ensured that no references exist from
     // the `page->heap->thread_delayed_free` into this page.
     // Currently only called through `Heap::collect` which ensures this.
+    // Corresponds to mimalloc `_mi_page_abandon` in src/page.c.
     pub unsafe fn abandon(page: Whole<Page>, queue: Ptr<PageQueue>) {
         // V
         Page::validate(page);
@@ -1074,6 +1112,7 @@ impl Page {
     }
 
     /// called from segments when reclaiming abandoned pages
+    // Corresponds to mimalloc `_mi_page_reclaim` in src/page.c.
     #[inline]
     pub unsafe fn reclaim(page: Whole<Page>, heap: Ptr<Heap>) {
         // V
@@ -1087,6 +1126,7 @@ impl Page {
         Page::validate(page);
     }
 
+    // Corresponds to mimalloc `mi_page_to_full` in src/page.c.
     #[inline]
     pub unsafe fn to_full(page: Whole<Page>, queue: Ptr<PageQueue>) {
         // V
@@ -1103,6 +1143,7 @@ impl Page {
     }
 
     // Move a page from the full list back to a regular list
+    // Corresponds to mimalloc `_mi_page_unfull` in src/page.c.
     #[inline]
     pub unsafe fn unfull(page: Whole<Page>) {
         // V
@@ -1125,6 +1166,7 @@ impl Page {
         PageQueue::enqueue_from(queue, pqfull, page);
     }
 
+    // Corresponds to mimalloc `mi_page_init` in src/page.c.
     unsafe fn init(page: Whole<Page>, heap: Ptr<Heap>, block_size: usize) {
         // V
         let segment = Page::segment(page);
@@ -1164,6 +1206,7 @@ impl Page {
     }
 
     // allocate a fresh page from a segment
+    // Corresponds to mimalloc `mi_page_fresh_alloc` in src/page.c.
     pub unsafe fn fresh_alloc(
         heap: Ptr<Heap>,
         queue: Ptr<PageQueue>,
@@ -1203,6 +1246,7 @@ impl Page {
     }
 
     // Get a fresh page to use
+    // Corresponds to mimalloc `mi_page_fresh` in src/page.c.
     unsafe fn fresh(heap: Ptr<Heap>, queue: Ptr<PageQueue>) -> Option<Whole<Page>> {
         internal_assert!(Heap::contains_queue(heap, queue));
         let page = Page::fresh_alloc(heap, queue, queue.block_size, 0)?;
@@ -1232,7 +1276,8 @@ impl Page {
         Page::alloc_free(page).or_else(|| Heap::alloc_generic(heap, layout))
     }
 
-    // Index a block in a page
+    // Index a block in a page.
+    // Corresponds to mimalloc `mi_page_block_at` in src/page.c.
     unsafe fn block_at(
         page: Whole<Page>,
         page_start: Whole<u8>,
@@ -1243,6 +1288,7 @@ impl Page {
         Whole::new_unchecked(page_start.as_ptr().byte_add(i * block_size).cast())
     }
 
+    // Corresponds to mimalloc `mi_page_free_list_extend` in src/page.c.
     unsafe fn free_list_extend(page: Whole<Page>, bsize: usize, extend: usize) {
         // V
         //internal_assert!(page.free_blocks.is_empty());
@@ -1323,11 +1369,12 @@ impl Page {
       }
       */
 
-    // Extend the capacity (up to reserved) by initializing a free list
-    // We do at most `MAX_EXTEND` to avoid touching too much memory
-    // Note: we also experimented with "bump" allocation on the first
-    // allocations but this did not speed up any benchmark (due to an
-    // extra test in malloc? or cache effects?)
+    // Corresponds to mimalloc `mi_page_extend_free` in src/page.c.
+    // Extend the capacity (up to reserved) by initializing a free list.
+    // We do at most `MAX_EXTEND` to avoid touching too much memory.
+    // Note: we also experimented with "bump" allocation on the first allocations
+    // but this did not speed up any benchmark (due to an extra test in malloc?
+    // or cache effects?).
     pub unsafe fn extend_free(page: Whole<Page>) {
         // V
         Page::validate_init(page);

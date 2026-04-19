@@ -41,6 +41,7 @@ unsafe extern "system" fn callback(_h: *mut (), dw_reason: u32, _pv: *mut ()) {
 }
 
 /// A clock in milliseconds.
+// Corresponds to mimalloc `_mi_prim_clock_now` in `src/prim/windows/prim.c`.
 pub fn clock_now() -> Option<u64> {
     let frequency = {
         static FREQUENCY: AtomicI64 = AtomicI64::new(0);
@@ -73,6 +74,7 @@ pub fn mul_div_u64(value: u64, numer: u64, denom: u64) -> u64 {
 }
 
 #[cfg(not(feature = "system-allocator"))]
+// Corresponds to mimalloc `_mi_prim_mem_init` in `src/prim/windows/prim.c`.
 pub fn page_size() -> usize {
     static PAGE_SIZE: AtomicU32 = AtomicU32::new(0);
 
@@ -113,6 +115,7 @@ fn highest_address() -> usize {
 pub struct SystemAllocation;
 
 #[cfg(not(feature = "system-allocator"))]
+// Corresponds to mimalloc `_mi_prim_commit` in `src/prim/windows/prim.c`.
 pub unsafe fn commit(ptr: Ptr<u8>, size: usize) -> bool {
     !VirtualAlloc(
         ptr.as_ptr().cast_const().cast(),
@@ -124,6 +127,7 @@ pub unsafe fn commit(ptr: Ptr<u8>, size: usize) -> bool {
 }
 
 #[cfg(not(feature = "system-allocator"))]
+// Corresponds to mimalloc `_mi_prim_decommit` in `src/prim/windows/prim.c`.
 pub unsafe fn decommit(ptr: Ptr<u8>, size: usize) -> bool {
     let result = VirtualFree(ptr.as_ptr().cast(), size, MEM_DECOMMIT);
     assert_ne!(result, 0);
@@ -131,6 +135,7 @@ pub unsafe fn decommit(ptr: Ptr<u8>, size: usize) -> bool {
 }
 
 #[cfg(not(feature = "system-allocator"))]
+// Corresponds to mimalloc `_mi_prim_alloc` in `src/prim/windows/prim.c`.
 pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>, bool)> {
     let mut address_reqs: MEM_ADDRESS_REQUIREMENTS = unsafe { mem::zeroed() };
     address_reqs.Alignment = layout.align();
@@ -163,6 +168,7 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
 }
 
 #[cfg(not(feature = "system-allocator"))]
+// Corresponds to mimalloc `_mi_prim_free` in `src/prim/windows/prim.c`.
 pub unsafe fn dealloc(_alloc: SystemAllocation, ptr: Ptr<u8>, _layout: Layout) {
     let result = VirtualFree(ptr.as_ptr().cast(), 0, MEM_RELEASE);
     assert_ne!(result, 0);

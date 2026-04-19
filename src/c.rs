@@ -19,11 +19,13 @@ unsafe fn alloc_layout(layout: Layout) -> *mut c_void {
     result.cast()
 }
 
+// Corresponds to mimalloc `mi_malloc` in `src/alloc.c:175-176` and the public `malloc` override in `src/alloc-override.c:132`.
 #[inline]
 pub extern "C" fn malloc(size: usize) -> *mut c_void {
     aligned_alloc(WORD_SIZE, size)
 }
 
+// Corresponds to mimalloc `mi_free` in `src/alloc.c:570-603` and the public `free` override in `src/alloc-override.c:135`.
 #[inline]
 pub unsafe extern "C" fn free(ptr: *mut c_void) {
     if ptr.is_null() {
@@ -34,6 +36,7 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
 }
 
 #[allow(clippy::redundant_closure)] // Not actually redundant
+// Corresponds to mimalloc `mi_calloc` / `mi_heap_calloc` in `src/alloc.c:680-688` and the public `calloc` override in `src/alloc-override.c:133`.
 #[inline]
 pub unsafe extern "C" fn calloc(items: usize, size: usize) -> *mut c_void {
     items
@@ -48,6 +51,7 @@ pub unsafe extern "C" fn calloc(items: usize, size: usize) -> *mut c_void {
         .unwrap_or(null_mut())
 }
 
+// Corresponds to mimalloc `mi_posix_memalign` in `src/alloc-posix.c:55-67`.
 #[inline]
 pub unsafe extern "C" fn posix_memalign(ptr: *mut *mut c_void, align: usize, size: usize) -> c_int {
     if ptr.is_null() {
@@ -67,6 +71,7 @@ pub unsafe extern "C" fn posix_memalign(ptr: *mut *mut c_void, align: usize, siz
     }
 }
 
+// Corresponds to mimalloc `mi_aligned_alloc` in `src/alloc-posix.c:86-99`.
 #[inline]
 pub extern "C" fn aligned_alloc(align: usize, size: usize) -> *mut c_void {
     unsafe {
@@ -84,6 +89,7 @@ pub extern "C" fn aligned_alloc(align: usize, size: usize) -> *mut c_void {
     }
 }
 
+// Corresponds to mimalloc `mi_realloc` / `_mi_heap_realloc_zero` in `src/alloc.c:715-745` and `src/alloc.c:776-777`.
 #[inline]
 pub unsafe extern "C" fn realloc(ptr: *mut c_void, new_size: usize) -> *mut c_void {
     if ptr.is_null() {
@@ -102,6 +108,7 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, new_size: usize) -> *mut c_vo
     new_ptr.cast()
 }
 
+// Corresponds to mimalloc `mi_strdup` / `mi_heap_strdup` in `src/alloc.c:804-816`.
 #[inline]
 pub unsafe extern "C" fn strdup(ptr: *const c_char) -> *mut c_char {
     if ptr.is_null() {
@@ -116,6 +123,7 @@ pub unsafe extern "C" fn strdup(ptr: *const c_char) -> *mut c_char {
     new
 }
 
+// Corresponds to mimalloc `mi_strndup` / `mi_heap_strndup` in `src/alloc.c:819-833`.
 #[inline]
 pub unsafe extern "C" fn strndup(ptr: *const c_char, length: usize) -> *mut c_char {
     if ptr.is_null() {

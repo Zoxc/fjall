@@ -75,6 +75,7 @@ pub struct SegmentThreadData {
 }
 
 impl SegmentThreadData {
+    // Corresponds to mimalloc `mi_segment_free_queue_of_kind` in src/segment.c.
     unsafe fn free_queue_of_kind(
         data: &mut SegmentThreadData,
         kind: PageKind,
@@ -131,6 +132,7 @@ pub struct Segment {
 }
 
 #[allow(overflowing_literals, unused)]
+// Corresponds to mimalloc `_mi_ptr_cookie` in include/mimalloc/internal.h.
 pub fn cookie<T, A>(ptr: Ptr<T, A>) -> usize {
     ptr.as_ptr().addr() ^ 0xa0f7b251664141e9
 }
@@ -141,6 +143,7 @@ impl Segment {
         unsafe { &mut (*segment.as_ptr()).node }
     }
 
+    // Corresponds to mimalloc `mi_segment_is_valid` in src/segment.c.
     pub unsafe fn validate(segment: Whole<Segment>, data: &mut SegmentThreadData) {
         if !cfg!(debug_assertions) {
             return;
@@ -172,6 +175,7 @@ impl Segment {
     }
 
     #[inline]
+    // Corresponds to mimalloc `_mi_segment_page_idx_of` in include/mimalloc/internal.h.
     unsafe fn page_index_from_pointer(
         segment: Whole<Segment>,
         ptr: Whole<AllocatedBlock>,
@@ -188,6 +192,7 @@ impl Segment {
     }
 
     #[inline]
+    // Corresponds to mimalloc `_mi_segment_page_of` in include/mimalloc/internal.h.
     pub unsafe fn page_from_pointer(
         segment: Whole<Segment>,
         ptr: Whole<AllocatedBlock>,
@@ -197,6 +202,7 @@ impl Segment {
     }
 
     #[inline]
+    // Corresponds to mimalloc `mi_segment_has_free` in src/segment.c.
     unsafe fn has_free(&self) -> bool {
         // V
         self.used.get() < self.capacity
@@ -213,6 +219,7 @@ impl Segment {
     // and we need align "down" to the segment info which is `SEGMENT_SIZE` bytes before it;
     // therefore we align one byte before `p`.
     #[inline]
+    // Corresponds to mimalloc `_mi_ptr_segment` in include/mimalloc/internal.h.
     pub unsafe fn from_pointer(ptr: Whole<AllocatedBlock>) -> Whole<Segment> {
         // V
 
@@ -231,6 +238,7 @@ impl Segment {
     }
 
     #[inline]
+    // Corresponds to mimalloc `mi_segment_raw_page_size` in src/segment.c.
     unsafe fn raw_page_size(&self) -> usize {
         // V
         if self.page_kind == PageKind::Huge {
@@ -243,6 +251,7 @@ impl Segment {
 
     // Raw start of the page available memory; can be used on uninitialized pages (only `segment_idx` must be set)
     // The raw start is not taking aligned block allocation into consideration.
+    // Corresponds to mimalloc `mi_segment_raw_page_start` in src/segment.c.
     unsafe fn raw_page_start(segment: Whole<Segment>, page: Whole<Page>) -> (Whole<u8>, usize) {
         // V
         internal_assert!((page.segment_idx as usize) < segment.capacity);
@@ -270,6 +279,7 @@ impl Segment {
     }
 
     // Start of the page available memory; can be used on uninitialized pages (only `segment_idx` must be set)
+    // Corresponds to mimalloc `_mi_segment_page_start` in src/segment.c.
     pub unsafe fn page_start(
         segment: Whole<Segment>,
         page: Whole<Page>,
@@ -302,6 +312,7 @@ impl Segment {
         (p, page_size)
     }
 
+    // Corresponds to mimalloc `mi_page_ensure_committed` in src/segment.c.
     unsafe fn page_ensure_committed(
         segment: Whole<Segment>,
         page: Whole<Page>,
@@ -332,6 +343,7 @@ impl Segment {
     }
 
     #[inline]
+    // Corresponds to mimalloc `mi_segment_page_claim` in src/segment.c.
     unsafe fn page_claim(
         segment: Whole<Segment>,
         page: Whole<Page>,
@@ -364,6 +376,7 @@ impl Segment {
     }
 
     #[inline]
+    // Corresponds to mimalloc `mi_segment_find_free` in src/segment.c.
     unsafe fn find_free(
         segment: Whole<Segment>,
         data: &mut SegmentThreadData,
@@ -382,6 +395,7 @@ impl Segment {
     }
 
     // Possibly clear pages and check if free space is available
+    // Corresponds to mimalloc `mi_segment_check_free` in src/segment.c.
     unsafe fn check_free(segment: Whole<Segment>, block_size: usize) -> (bool, bool) {
         // V
         internal_assert!(block_size <= LARGE_OBJ_SIZE_MAX);
@@ -414,6 +428,7 @@ impl Segment {
 
     // Reclaim a segment; returns NULL if the segment was freed
     // set `right_page_reclaimed` to `true` if it reclaimed a page of the right `block_size` that was not full.
+    // Corresponds to mimalloc `mi_segment_reclaim` in `src/segment.c`.
     unsafe fn reclaim(
         segment: Whole<Segment>,
         heap: Ptr<Heap>,
@@ -487,6 +502,7 @@ impl Segment {
         }
     }
 
+    // Corresponds to mimalloc `mi_segment_try_reclaim` in `src/segment.c`.
     unsafe fn try_reclaim(
         heap: Ptr<Heap>,
         block_size: usize,
@@ -535,6 +551,7 @@ impl Segment {
         result.and_then(|r| r)
     }
 
+    // Corresponds to mimalloc `mi_segment_calculate_sizes` in `src/segment.c`.
     fn calculate_sizes(
         capacity: usize,
         required: usize,
@@ -572,6 +589,7 @@ impl Segment {
     }
 
     // Allocate a segment from the OS aligned to `SEGMENT_SIZE` .
+    // Corresponds to mimalloc `mi_segment_alloc` in `src/segment.c`.
     unsafe fn alloc(
         required: usize,
         page_kind: PageKind,
@@ -678,6 +696,7 @@ impl Segment {
         Some(segment)
     }
 
+    // Corresponds to mimalloc `mi_segment_reclaim_or_alloc` in `src/segment.c`.
     unsafe fn reclaim_or_alloc(
         heap: Ptr<Heap>,
         block_size: usize,
@@ -708,6 +727,7 @@ impl Segment {
         Segment::alloc(0, page_kind, page_shift, 0, data)
     }
 
+    // Corresponds to mimalloc `mi_segment_page_try_alloc_in_queue` in `src/segment.c`.
     unsafe fn page_try_alloc_in_queue(
         _heap: Ptr<Heap>,
         free_queue: impl Fn(&mut SegmentThreadData) -> &mut List<Whole<Segment>>,
@@ -748,6 +768,7 @@ impl Segment {
         }
     }
 
+    // Corresponds to mimalloc `mi_segment_large_page_alloc` in `src/segment.c`.
     unsafe fn alloc_large_page(
         heap: Ptr<Heap>,
         block_size: usize,
@@ -785,6 +806,7 @@ impl Segment {
         */
     }
 
+    // Corresponds to mimalloc `mi_segment_huge_page_alloc` in `src/segment.c`.
     pub unsafe fn alloc_huge_page(
         size: usize,
         page_alignment: usize,
@@ -819,6 +841,7 @@ impl Segment {
         Some(page)
     }
 
+    // Corresponds to mimalloc `_mi_segment_page_alloc` in `src/segment.c`.
     pub unsafe fn page_alloc(
         heap: Ptr<Heap>,
         block_size: usize,
@@ -864,6 +887,7 @@ impl Segment {
         page
     }
 
+    // Corresponds to mimalloc `mi_pages_try_purge` in `src/segment.c`.
     unsafe fn pages_try_purge(data: &mut SegmentThreadData) {
         // V
         let now = system::clock_now();
@@ -884,6 +908,7 @@ impl Segment {
         // FIXME: Optimize clearing out all purged pages. We could remove all at the end here.
     }
 
+    // Corresponds to mimalloc `_mi_segment_page_abandon` in `src/segment.c`.
     pub unsafe fn page_abandon(page: Whole<Page>, data: &mut SegmentThreadData) {
         // V
         internal_assert!((*page).thread_free_flag() == DelayedMode::NeverDelayedFree);
@@ -904,6 +929,7 @@ impl Segment {
     /* -----------------------------------------------------------
       Page reset
     ----------------------------------------------------------- */
+    // Corresponds to mimalloc `mi_page_purge` in `src/segment.c`.
     unsafe fn page_purge(segment: Whole<Segment>, page: Whole<Page>, data: &mut SegmentThreadData) {
         // V
         internal_assert!(page.is_committed.get());
@@ -921,6 +947,7 @@ impl Segment {
         page.used.set(0);
     }
 
+    // Corresponds to mimalloc `mi_segment_schedule_purge` in `src/segment.c`.
     unsafe fn schedule_purge(
         segment: Whole<Segment>,
         page: Whole<Page>,
@@ -947,6 +974,7 @@ impl Segment {
     }
 
     /// clear page data; can be called on abandoned segments
+    // Corresponds to mimalloc `mi_segment_page_clear` in `src/segment.c`.
     unsafe fn page_clear(segment: Whole<Segment>, page: Whole<Page>, data: &mut SegmentThreadData) {
         // V
         internal_assert!(page.segment_in_use.get());
@@ -974,6 +1002,7 @@ impl Segment {
         page.reserved.set(0);
     }
 
+    // Corresponds to mimalloc `mi_segment_os_free` in `src/segment.c`.
     unsafe fn os_free(segment: Whole<Segment>, segment_size: usize) {
         // V
 
@@ -1011,6 +1040,7 @@ impl Segment {
         );
     }
 
+    // Corresponds to mimalloc `mi_segment_remove_all_purges` in `src/segment.c`.
     unsafe fn remove_all_purges(
         segment: Whole<Segment>,
         force_purge: bool,
@@ -1030,6 +1060,7 @@ impl Segment {
         }
     }
 
+    // Corresponds to mimalloc `mi_segment_free` in `src/segment.c`.
     unsafe fn free(segment: Whole<Segment>, data: &mut SegmentThreadData) {
         // V
         // don't purge as we are freeing now
@@ -1044,6 +1075,7 @@ impl Segment {
     }
 
     // remove from free queue if it is in one
+    // Corresponds to mimalloc `mi_segment_remove_from_free_queue` in `src/segment.c`.
     unsafe fn remove_from_free_queue(segment: Whole<Segment>, data: &mut SegmentThreadData) {
         // V
         let queue = SegmentThreadData::free_queue_of_kind(data, segment.page_kind);
@@ -1056,6 +1088,7 @@ impl Segment {
 
     // mark a specific segment as abandoned
     // clears the thread_id.
+    // Corresponds to mimalloc `_mi_arena_segment_mark_abandoned` in `src/arena.c`.
     unsafe fn mark_abandoned(segment: Whole<Segment>) {
         segment.thread_id.store(0, Ordering::Release);
         internal_assert!(segment.used == segment.abandoned);
@@ -1067,6 +1100,7 @@ impl Segment {
        Abandon segment/page
     ----------------------------------------------------------- */
 
+    // Corresponds to mimalloc `mi_segment_abandon` in `src/segment.c`.
     unsafe fn abandon(segment: Whole<Segment>, data: &mut SegmentThreadData) {
         // V
         internal_assert!(segment.used.get() == segment.abandoned.get());
@@ -1095,11 +1129,13 @@ impl Segment {
         Segment::mark_abandoned(segment);
     }
 
+    // Corresponds to mimalloc `mi_segment_insert_in_free_queue` in `src/segment.c`.
     unsafe fn insert_in_free_queue(segment: Whole<Segment>, data: &mut SegmentThreadData) {
         let queue = SegmentThreadData::free_queue_of_kind(data, segment.page_kind);
         queue.unwrap_unchecked().push_back(segment, Segment::node);
     }
 
+    // Corresponds to mimalloc `_mi_segment_page_free` in `src/segment.c`.
     pub unsafe fn page_free(page: Whole<Page>, _force: bool, data: &mut SegmentThreadData) {
         let segment = Page::segment(page);
         Segment::validate(segment, data);

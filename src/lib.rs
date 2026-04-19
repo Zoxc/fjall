@@ -237,12 +237,14 @@ fn overlaps(a: Range<usize>, b: Range<usize>) -> bool {
     max(a.start, b.start) <= min(a.end - 1, b.end - 1)
 }
 
+// Corresponds to mimalloc `_mi_align_down` in `src/os.c:76-84`.
 #[inline(always)]
 fn align_down(val: usize, align: usize) -> usize {
     internal_assert!(align.is_power_of_two());
     val & !(align - 1)
 }
 
+// Corresponds to mimalloc `_mi_align_up` in `include/mimalloc/internal.h:304-312`.
 #[inline(always)]
 fn align_up(val: usize, align: usize) -> usize {
     internal_assert!(align.is_power_of_two());
@@ -263,6 +265,7 @@ fn checked_align_up(val: usize, align: usize) -> Option<usize> {
     Some((val.checked_add(align - 1)?) & !(align - 1))
 }
 
+// Corresponds to mimalloc `_mi_is_aligned` in `include/mimalloc/internal.h:298-300`.
 #[inline(always)]
 fn validate_align<T>(ptr: *mut T, align: usize) {
     internal_assert!(align.is_power_of_two());
@@ -270,6 +273,7 @@ fn validate_align<T>(ptr: *mut T, align: usize) {
 }
 
 /// Returns the number of words in `size` rounded up.
+// Corresponds to mimalloc `_mi_wsize_from_size` in `include/mimalloc/internal.h:337-340`.
 #[inline(always)]
 fn word_count(size: usize) -> usize {
     align_up(size, WORD_SIZE) / WORD_SIZE
@@ -281,6 +285,7 @@ unsafe fn index_array<T, const S: usize>(array: *const [T; S], index: usize) -> 
     unsafe { array.cast::<T>().add(index) }
 }
 
+// Corresponds to mimalloc `mi_bin` / `_mi_bin` in `src/page-queue.c:56-103`.
 #[inline]
 fn bin_index(size: usize) -> usize {
     let w = word_count(size);
@@ -305,6 +310,7 @@ fn bin_index(size: usize) -> usize {
 }
 
 /// "bit scan reverse": Return index of the highest bit (or PTR_BITS if `x` is zero)
+// Corresponds to mimalloc `mi_bsr` in `include/mimalloc/internal.h:851-853`.
 const fn bit_scan_reverse(x: usize) -> usize {
     if x == 0 {
         mem::size_of::<usize>() * 8
@@ -335,6 +341,7 @@ fn with_heap<R>(f: impl FnOnce(Ptr<Heap>) -> R) -> R {
 }
 
 /// A thread id which may be reused when the thread exits. This must be non-zero.
+// Corresponds to mimalloc `_mi_thread_id` in `src/init.c:111-113`.
 #[inline]
 fn thread_id() -> usize {
     LOCAL_HEAP.with(|heap| heap.get().addr())
@@ -346,12 +353,14 @@ fn is_main_thread() -> bool {
 }
  */
 
+// Corresponds to mimalloc `mi_atomic_yield` in `include/mimalloc/atomic.h:323-385`.
 fn yield_now() {
     std::thread::yield_now();
 }
 
 pub struct Alloc;
 
+// Corresponds to mimalloc `mi_atomic_cas_weak_acq_rel` in `include/mimalloc/atomic.h:67`.
 #[inline]
 fn compare_exchange_weak_acq_rel<T>(
     atomic: &AtomicPtr<T>,
@@ -366,6 +375,7 @@ fn compare_exchange_weak_acq_rel<T>(
     false
 }
 
+// Corresponds to mimalloc `mi_atomic_cas_weak_release` in `include/mimalloc/atomic.h:66`.
 #[inline]
 fn compare_exchange_weak_release<T>(
     atomic: &AtomicPtr<T>,
@@ -425,6 +435,7 @@ unsafe fn alloc_padded_end(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<Allo
     })
 }
 
+// Corresponds to mimalloc `mi_heap_malloc` in `src/alloc.c:171-173`.
 #[inline]
 #[cfg(not(debug_assertions))]
 unsafe fn alloc_padded_end(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<AllocatedBlock>> {
@@ -444,6 +455,7 @@ unsafe fn free_padded_end(allocation: Whole<AllocatedBlock>) {
     Heap::free(allocation)
 }
 
+// Corresponds to mimalloc `mi_free` in `src/alloc.c:570-603`.
 #[inline]
 #[cfg(not(debug_assertions))]
 unsafe fn free_padded_end(ptr: Whole<AllocatedBlock>) {
@@ -495,6 +507,7 @@ unsafe fn free_padded(ptr: Whole<AllocatedBlock>, layout: Layout) {
     Heap::free(allocation)
 }
 
+// Corresponds to mimalloc `mi_free` in `src/alloc.c:570-603`.
 #[inline]
 #[cfg(not(debug_assertions))]
 unsafe fn free_padded(ptr: Whole<AllocatedBlock>, _layout: Layout) {

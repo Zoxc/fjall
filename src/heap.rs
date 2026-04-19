@@ -204,6 +204,7 @@ impl Heap {
         &mut *self.thread_data.get()
     }
 
+    // Corresponds to mimalloc _mi_heap_delayed_free_all in src/page.c.
     unsafe fn delayed_free_all(heap: Ptr<Heap>) {
         // V
         while !Heap::delayed_free_partial(heap) {
@@ -212,6 +213,7 @@ impl Heap {
     }
 
     // returns true if all delayed frees were processed
+    // Corresponds to mimalloc _mi_heap_delayed_free_partial in src/page.c.
     unsafe fn delayed_free_partial(heap: Ptr<Heap>) -> bool {
         // V
 
@@ -246,6 +248,7 @@ impl Heap {
     }
 
     // Visit all pages in a heap; returns `false` if break was called.
+    // Corresponds to mimalloc mi_heap_visit_pages in src/heap.c.
     unsafe fn visit_pages(
         heap: Ptr<Heap>,
         mut visitor: impl FnMut(Whole<Page>, Ptr<PageQueue>) -> bool,
@@ -274,6 +277,7 @@ impl Heap {
     }
 
     #[inline]
+    // Corresponds to mimalloc _mi_heap_done in src/init.c.
     pub unsafe fn done(heap: Ptr<Heap>) {
         // V
         if heap.state.get() == HeapState::Uninit {
@@ -295,6 +299,7 @@ impl Heap {
     }
 
     #[inline]
+    // Corresponds to mimalloc mi_heap_contains_queue in src/page-queue.c.
     pub fn contains_queue(heap: Ptr<Heap>, queue: Ptr<PageQueue>) -> bool {
         let queue = queue.as_ptr().cast_const();
         heap.page_queues.as_ptr() <= queue
@@ -302,6 +307,7 @@ impl Heap {
     }
 
     #[inline]
+    // Corresponds to mimalloc mi_heap_page_is_valid in src/heap.c.
     pub unsafe fn validate_page(heap: Ptr<Heap>, page: Whole<Page>) {
         if !cfg!(debug_assertions) {
             return;
@@ -314,6 +320,7 @@ impl Heap {
     }
 
     #[inline]
+    // Corresponds to mimalloc mi_heap_collect_ex in src/heap.c.
     unsafe fn collect(heap: Ptr<Heap>, collect: Collect) {
         // V
         internal_assert!(heap.state.get() == HeapState::Active);
@@ -390,6 +397,7 @@ impl Heap {
 
     // free retired pages: we don't need to look at the entire queues
     // since we only retire pages that are at the head position in a queue.
+    // Corresponds to mimalloc _mi_heap_collect_retired in src/page.c.
     pub unsafe fn collect_retired(heap: Ptr<Heap>, force: bool) {
         // V
         let mut min = BIN_FULL;
@@ -427,6 +435,7 @@ impl Heap {
     // size without having to compute the bin. This means when the
     // current free page queue is updated for a small bin, we need to update a
     // range of entries in `_mi_page_small_free`.
+    // Corresponds to mimalloc `mi_heap_queue_first_update` in `src/page-queue.c`.
     #[inline]
     pub unsafe fn queue_first_update(heap: Ptr<Heap>, queue: Ptr<PageQueue>) {
         // V
@@ -476,6 +485,7 @@ impl Heap {
         }
     }
 
+    // Corresponds to mimalloc `mi_page_queue` in `include/mimalloc/internal.h`.
     #[inline]
     pub unsafe fn page_queue_for_size(heap: Ptr<Heap>, size: usize) -> Ptr<PageQueue> {
         let index = bin_index(size);
@@ -490,6 +500,7 @@ impl Heap {
         queue
     }
 
+    // Corresponds to mimalloc `mi_find_free_page` in `src/page.c`.
     #[inline]
     unsafe fn find_free_page(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<Page>> {
         // V
@@ -507,6 +518,7 @@ impl Heap {
         PageQueue::find_free(queue, heap, true)
     }
 
+    // Corresponds to mimalloc `mi_find_page` in `src/page.c`.
     #[inline]
     unsafe fn find_page(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<Page>> {
         // V
@@ -521,6 +533,7 @@ impl Heap {
         }
     }
 
+    // Corresponds to mimalloc `_mi_free_generic` in `src/alloc.c`.
     #[inline(never)]
     unsafe fn free_generic(
         segment: Whole<Segment>,
@@ -538,6 +551,7 @@ impl Heap {
         Page::free_block(page, is_local, block);
     }
 
+    // Corresponds to mimalloc `mi_free` in `src/alloc.c`.
     #[inline]
     pub unsafe fn free(ptr: Whole<AllocatedBlock>) {
         // V
@@ -574,6 +588,7 @@ impl Heap {
     // just that page, we always treat them as abandoned and any thread
     // that frees the block can free the whole page and segment directly.
     // Huge pages are also used if the requested alignment is very large (> MI_ALIGNMENT_MAX).
+    // Corresponds to mimalloc `mi_huge_page_alloc` in `src/page.c`.
     unsafe fn alloc_huge(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<Page>> {
         // V
         let block_size = layout.size(); //_mi_os_good_alloc_size(size);
@@ -610,6 +625,7 @@ impl Heap {
         }
     }
 
+    // Corresponds to mimalloc `mi_usable_size` in `src/alloc.c`.
     #[inline]
     pub unsafe fn usable_size(block: Whole<AllocatedBlock>) -> usize {
         let segment = Segment::from_pointer(block);
@@ -682,6 +698,7 @@ impl Heap {
         Some(aligned)
     }
 
+    // Corresponds to mimalloc `_mi_malloc_generic` in `src/page.c`.
     pub unsafe fn alloc_generic(heap: Ptr<Heap>, layout: Layout) -> Option<Whole<AllocatedBlock>> {
         // V
         internal_assert!(!Self::adjust_alignment(layout));

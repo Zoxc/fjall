@@ -15,6 +15,7 @@ use std::sync::LazyLock;
 #[cfg(not(feature = "system-allocator"))]
 use {core::sync::atomic::AtomicUsize, core::sync::atomic::Ordering};
 
+// Corresponds to mimalloc `mi_pthread_done` in `src/prim/unix/prim.c`.
 unsafe extern "C" fn thread_done(value: *mut c_void) {
     if !value.is_null() {
         with_heap(|heap| Heap::done(heap));
@@ -36,6 +37,7 @@ pub fn register_thread() {
 }
 
 #[cfg(not(feature = "system-allocator"))]
+// Corresponds to mimalloc `_mi_prim_mem_init` in `src/prim/unix/prim.c`.
 pub fn page_size() -> usize {
     static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
 
@@ -51,6 +53,7 @@ pub fn page_size() -> usize {
 }
 
 /// A clock in milliseconds.
+// Corresponds to mimalloc `_mi_prim_clock_now` in `src/prim/unix/prim.c`.
 pub fn clock_now() -> Option<u64> {
     unsafe {
         let mut t = mem::zeroed();
@@ -66,6 +69,7 @@ pub struct SystemAllocation {
 }
 
 #[cfg(not(feature = "system-allocator"))]
+// Corresponds to mimalloc `_mi_prim_commit` in `src/prim/unix/prim.c`.
 pub unsafe fn commit(ptr: Ptr<u8>, size: usize) -> bool {
     let result = libc::mprotect(ptr.as_ptr().cast(), size, PROT_READ | PROT_WRITE);
     internal_assert!(result == 0);
@@ -73,6 +77,7 @@ pub unsafe fn commit(ptr: Ptr<u8>, size: usize) -> bool {
 }
 
 #[cfg(not(feature = "system-allocator"))]
+// Corresponds to mimalloc `_mi_prim_decommit` in `src/prim/unix/prim.c`.
 pub unsafe fn decommit(ptr: Ptr<u8>, size: usize) -> bool {
     // decommit: use MADV_DONTNEED as it decreases rss immediately (unlike MADV_FREE)
     let result = libc::madvise(ptr.as_ptr().cast(), size, MADV_DONTNEED);
@@ -81,6 +86,7 @@ pub unsafe fn decommit(ptr: Ptr<u8>, size: usize) -> bool {
 }
 
 #[cfg(not(feature = "system-allocator"))]
+// Corresponds to mimalloc `_mi_prim_alloc` in `src/prim/unix/prim.c`.
 pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>, bool)> {
     let size = layout.size().checked_add(layout.align() - 1)?;
     let protect_flags = if commit {
@@ -136,6 +142,7 @@ pub fn alloc(layout: Layout, commit: bool) -> Option<(SystemAllocation, Ptr<u8>,
 }
 
 #[cfg(not(feature = "system-allocator"))]
+// Corresponds to mimalloc `_mi_prim_free` in `src/prim/unix/prim.c`.
 pub unsafe fn dealloc(_alloc: SystemAllocation, ptr: Ptr<u8>, layout: Layout) {
     let page_size = page_size();
 
